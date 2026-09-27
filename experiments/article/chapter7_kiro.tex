@@ -1,0 +1,1161 @@
+\acresetall
+\chapter{Damage-Aware Nominal Reconstruction}
+\label{chap:ml-reconstruction}
+
+% The previous chapters addressed nominal-independent damage detection using both descriptor-based and \ac{dl}-based approaches. While these methods enable localization of damaged regions, automated \ac{am} repair additionally requires reconstruction of the nominal geometry to estimate repair volume, define restoration boundaries, and support downstream deposition planning.
+
+The previous chapters addressed nominal-independent damage detection using both descriptor-based and \ac{dl}-based approaches. While these methods enable localization of damaged regions, automated \ac{am} repair additionally requires reconstruction of the nominal geometry to estimate repair volume, define restoration boundaries, and generate deposition strategies consistent with the intended nominal surface.
+
+As discussed in Chapter~\ref{chap:state-of-the-art}, reconstruction in repair-oriented scenarios differs fundamentally from conventional shape completion problems. In industrial repair applications, damage is typically sparse and spatially localized, while most of the scanned geometry remains intact and geometrically reliable. Consequently, reconstruction should not be formulated as global shape generation, but rather as a localized geometric correction problem in which only the damaged region must be restored while the surrounding surface is preserved.
+
+This distinction becomes particularly important in nominal-independent repair workflows, where accurate \ac{cad} references may be unavailable, outdated, or inconsistent with the actual component condition due to wear, deformation, or previous repair operations. Under these conditions, the nominal geometry must be inferred directly from measured data while maintaining geometric continuity with the intact surface surrounding the damaged region.
+
+Existing reconstruction approaches present important limitations in this context. Traditional geometry-based methods commonly rely on assumptions such as smoothness, symmetry, cross-sectional regularity, or surface continuity, which restrict their applicability to heterogeneous or free-form geometries. Learning-based approaches, in contrast, are predominantly formulated either as global shape completion methods or as unconstrained displacement estimation problems. As a result, they do not explicitly address the dual requirement that characterizes repair-oriented reconstruction: localized nominal recovery together with strict preservation of intact geometry.
+
+Building upon the point-wise damage representations introduced in Chapter~\ref{chap:ml-damage-detection}, this chapter investigates damage-aware nominal reconstruction using \ac{dl}. Instead of reconstructing the complete geometry, the problem is formulated as localized surface correction, where prediction is explicitly constrained to damaged regions identified during damage detection.
+
+To enable systematic evaluation under controlled repair-oriented conditions, a synthetic dataset containing localized surface damages is introduced. Multiple reconstruction paradigms are comparatively investigated, including completion-based reconstruction, blind displacement estimation, and label-guided displacement strategies. Through this progressive evaluation, the limitations of global completion and unconstrained displacement formulations are analyzed, motivating a reconstruction strategy based on prediction-domain restriction.
+
+Based on these observations, a novel architecture, SeedDispNet, is proposed for damage-aware nominal reconstruction. The method formulates reconstruction as a seed-based displacement prediction applied exclusively to damaged regions, enabling localized geometric correction while preserving intact geometry.
+
+The objective of this chapter is therefore twofold: first, to investigate how different reconstruction paradigms behave under sparse and spatially localized damage conditions; and second, to evaluate whether damage-aware displacement-based reconstruction can achieve accurate nominal surface recovery while maintaining geometric consistency with the intact surrounding surface. In doing so, this chapter establishes localized nominal reconstruction as a fundamental component of automated nominal-independent \ac{am} repair workflows.
+
+\section{Dataset}
+\label{sec:dataset_7}
+
+As discussed in Chapter~\ref{chap:state-of-the-art}, existing \ac{3d} reconstruction and completion benchmarks are primarily designed for object-level completion tasks involving large missing regions caused by occlusions or partial observations. In contrast, reconstruction in \ac{am} repair scenarios is characterized by sparse and spatially localized material loss, where most of the observed geometry remains intact and should be preserved during reconstruction.
+
+In addition, existing datasets generally do not provide point-wise damage annotations distinguishing damaged and intact regions. This limitation restricts their applicability to interconnected repair workflows, where damage localization produced during inspection or damage detection is expected to directly guide the subsequent reconstruction process by constraining geometric correction to regions requiring restoration.
+
+To enable systematic evaluation under repair-oriented conditions, this chapter introduces DMSurface, a synthetic dataset specifically designed for localized nominal geometry reconstruction on damaged surfaces. The dataset consists of localized geometric deviations through controlled surface deformation while simultaneously providing point-wise damage labels and nominal correspondences required for supervised reconstruction.
+
+Unlike conventional object-level completion datasets \cite{Chang2015}, DMSurface is intentionally formulated at the local surface level. In practical repair scenarios, reconstruction is typically required only within a neighborhood surrounding the damaged region, while the remaining component geometry remains available and geometrically reliable. Consequently, local damaged regions extracted from complex industrial components can often be represented through simpler surface behaviors, including planar, curved, and free-form patches.
+
+This formulation reduces dependence on global object semantics and instead encourages learning of transferable geometric priors associated with localized surface restoration. Rather than learning complete object reconstruction, the objective becomes learning how nominal surfaces evolve locally around damaged regions while maintaining geometric consistency with the surrounding intact structure.
+
+\subsection{Surface Generation and Damage Modeling}
+
+The dataset comprises 20 nominal surface geometries with varying characteristics, including planar, curved, and free-form surfaces. For each nominal surface, 50 damaged variants are generated through a controlled deformation process designed to simulate localized material loss.
+
+Each surface is densely sampled into \acp{pc} containing approximately 100K--200K points. Damage is introduced by randomly placing 10 dents per surface while enforcing a minimum separation distance to prevent overlap between neighboring damage regions. Each dent is parameterized by a center location, radius (2.5--35~mm), and depth (5--35~mm).
+
+The deformation profile follows a Gaussian depth formulation, where the standard deviation is proportional to the dent radius, producing cavity depressions. To increase morphological variability and better approximate realistic wear behavior, boundary irregularity is introduced through multi-frequency sinusoidal modulation, generating non-circular and spatially heterogeneous contours. Additional coherent spatial noise is incorporated to simulate irregular cavity interiors and localized surface roughness.
+
+Points belonging to damaged regions are displaced inward along the local surface normals according to the generated deformation profile. This formulation preserves continuity in surrounding intact regions while introducing controlled local deviations representative of material loss. Fig.~\ref{fig:Figure_1_7} illustrates representative damaged surface samples from the generated dataset, highlighting variations in surface topology, damage morphology, and spatial distribution.
+
+\begin{figure*}[p]
+\centering
+\includegraphics[width=0.9\textwidth]{figs/Figure_1_7.png}
+% \caption{Representative surface geometries with synthetically generated localized damage.}
+\caption{Overview of the surface geometries included in the dataset. Damage-labeled regions are highlighted in red.}
+\label{fig:Figure_1_7}
+\end{figure*}
+
+Although the proposed deformation process reproduces several geometric characteristics commonly observed in damaged metallic components, including smooth depth variation, irregular boundaries, and localized roughness, it remains a simplified approximation of real industrial damage. Real-world damage may additionally involve sharp discontinuities, sensing artifacts, non-uniform sampling, occlusions, and complex wear mechanisms that are not explicitly modeled in the synthetic dataset generation process.
+
+However, the objective of DMSurface is not to reproduce complete industrial components or specific degradation phenomena with full physical fidelity. Instead, the dataset is intended to model local surface behaviors representative of the geometric neighborhoods typically encountered around damaged regions during repair. Since reconstruction is performed on local partitions rather than complete objects, the proposed surface topologies are designed to capture transferable geometric structures that commonly arise in industrial components, including planar, curved, and free-form surface regions.
+
+The use of controlled synthetic generation additionally enables systematic and reproducible evaluation while providing precise point-wise correspondence between damaged and nominal geometries. Consequently, DMSurface is primarily intended as a controlled benchmark for comparative evaluation of reconstruction strategies under localized repair-oriented conditions.
+
+\subsection{Spatial Partitioning and Labeling}
+
+To reflect the local nature of reconstruction in repair workflows, full \acp{pc} are partitioned into spatial regions $\mathcal{P}_{k}$ using the same \ac{3d} grid-based strategy introduced in Chapter~\ref{chap:ml-damage-detection}. As discussed previously, this partition-based formulation transforms reconstruction into a neighborhood-scale geometric learning problem by operating on local surface regions rather than complete component geometries.
+
+Each partition is subsequently resampled to a fixed size of 2048 points, generating standardized reconstruction samples suitable for supervised learning. For every damaged partition, a corresponding nominal partition is extracted using identical point indices, ensuring direct point-wise correspondence between damaged and ground-truth geometries.
+
+Each point is additionally assigned a binary label indicating whether it belongs to intact geometry ($\ell=0$) or to the reconstruction region ($\ell=1$). In damaged partitions, $\ell=1$ identifies points affected by synthetic deformation requiring geometric restoration, while in the corresponding nominal partitions, the same labels identify the points restored. Since labels are generated directly from the deformation process, precise point-wise supervision is available for both damage localization and nominal reconstruction.
+
+Unlike the segmentation formulation presented in Chapter~\ref{chap:ml-damage-detection}, where labels constitute the prediction objective, labels are used here to explicitly constrain the reconstruction domain. This formulation therefore separates points requiring geometric correction from points that should remain unchanged, directly aligning reconstruction with the localized nature of industrial repair. Furthermore, this distinction enables reconstruction strategies that selectively operate only on damaged regions while preserving intact geometry.
+
+\subsection{Post-processing and Dataset Split}
+
+Partitions containing exclusively damaged points are removed, since reconstruction requires surrounding intact geometry to infer local surface continuity. Without neighboring intact regions, the reconstruction problem becomes underconstrained and no longer reflects the repair-oriented scenario considered in this work.
+
+% Similarly, partitions containing only intact points are excluded because they do not provide meaningful supervision for geometric reconstruction. After filtering, approximately 13.4\% of partition pairs are removed, resulting in a final dataset containing approximately 11K valid partition pairs.
+
+Similarly, partitions containing only intact points are excluded because the reconstruction task is defined over partitions containing damage. Including intact-only samples would overrepresent identity mappings and reduce the emphasis on learning damage restoration. After filtering, approximately 13.4\% of partition pairs are removed, resulting in a final dataset containing approximately 11K valid partition pairs.
+
+To evaluate generalization across unseen geometries, the dataset is divided at the surface level into training, validation, and test splits. This prevents information leakage between partitions originating from the same nominal surface and enables evaluation of reconstruction behavior across previously unseen geometric configurations.
+
+Table~\ref{tab:dmsurface_split} summarizes the final dataset distribution.
+
+\begin{table}[h]
+\small
+\centering
+\caption{Distribution of the filtered DMSurface dataset across training, validation, and test splits. Partitions are extracted from distinct nominal surface geometries to ensure evaluation on unseen shapes.}
+\label{tab:dmsurface_split}
+\begin{tabular}{l c c c}
+\hline
+\textbf{Split} &
+\textbf{Surfaces} &
+\textbf{Partitions} &
+\textbf{Purpose} \\
+\hline
+Train & 1--14 (14) & $\sim$7,850 & Model training \\
+Valid & 15--17 (3) & $\sim$1,634 & Hyperparameter selection \\
+Test & 18--20 (3) & $\sim$1,765 & Final evaluation \\
+\hline
+\end{tabular}
+\end{table}
+
+\section{Methodology}
+\label{sec:methods}
+
+Consistent with the localized reconstruction perspective introduced previously, nominal geometry reconstruction is formulated as a localized and label-guided geometric correction problem defined on unstructured \acp{pc}.
+
+As discussed in Chapter~\ref{chap:state-of-the-art}, existing reconstruction approaches can be broadly divided into completion-based and displacement-based paradigms. Completion-based methods reconstruct geometry globally from partial observations, whereas displacement-based methods estimate geometric corrections directly on existing points. However, neither formulation explicitly addresses the dual repair requirement of restricting reconstruction to damaged regions while simultaneously preserving surrounding intact geometry.
+
+From the perspective of prediction-domain definition, displacement-based reconstruction methods can additionally be divided into unconstrained and constrained formulations. In unconstrained formulations, displacement vectors are predicted for the entire point set, whereas constrained formulations restrict prediction to points identified as damaged. To investigate these differences under repair-oriented conditions, five reconstruction configurations are comparatively evaluated, progressively incorporating increasing levels of locality, damage awareness, and prediction-domain restriction: the completion-based \ac{pcn} \cite{Yuan2019}; a label-guided completion variant termed \ac{lrpcn}; the displacement-based FlowNet3D \cite{FlowNet3D2019}; the denoising-oriented PointCleanNet \cite{Marie2019}; and the proposed SeedDispNet architecture.
+
+Collectively, these methods represent a progressive transition from global unconstrained reconstruction toward localized constrained geometric correction. This progression enables systematic analysis of how reconstruction paradigm, damage localization, and prediction-domain restriction influence nominal geometry recovery under localized repair conditions.
+
+All methods are evaluated under a unified experimental protocol using identical dataset partitions, preprocessing strategies, and evaluation metrics. At the same time, each model preserves its native architectural formulation and optimization strategy, ensuring that the observed differences primarily reflect the reconstruction formulation itself rather than implementation-specific variations.
+
+\subsection{Problem Formulation}
+\label{sec:problem_formulation}
+
+Nominal geometry reconstruction for \ac{am} repair is formulated as a localized geometric correction problem operating on damaged \acp{pc} augmented with point-wise damage labels. Let a damaged partition $\mathcal{P}_{k}$ be defined as in Chapter~\ref{chap:ml-damage-detection} (Eq.~\ref{eq:pk_definition}), the corresponding binary damage labels are defined as
+
+\begin{equation}
+\mathcal{L}_k =
+\left\{
+\ell_i \in \{0,1\}
+\mid
+i = 1,\dots,N_k
+\right\},
+\label{eq:label}
+\end{equation}
+
+\noindent where $\ell_i$ indicates whether the $i$-th point belongs to intact geometry ($\ell_i = 0$) or damaged geometry ($\ell_i = 1$). Together, $(\mathcal{P}_k,\mathcal{L}_k)$ define a labeled damaged partition.
+
+% where $\mathbf{p}_i$ denotes the \ac{3d} coordinates of the $i$-th point and $\ell_i \in \{0,1\}$ is a binary label indicating whether the point belongs to intact geometry ($\ell_i = 0$) or damaged geometry ($\ell_i = 1$).
+
+The corresponding nominal ground-truth partition is defined as
+\begin{equation}
+\mathcal{P}_{k}^{gt}
+=
+\left\{
+\mathbf{p}_{k_i}^{gt} \in \mathbb{R}^{3}
+\mid
+i = 1,\dots,N_k
+\right\},
+\end{equation}
+
+\noindent where point-wise correspondence with the damaged partition $\mathcal{P}_{k}$ is preserved.
+
+The reconstruction objective consists of estimating a reconstructed partition
+
+\begin{equation}
+\mathcal{P}_{k}^{*}
+=
+\left\{
+\mathbf{p}_{k_i}^{*} \in \mathbb{R}^{3}
+\mid
+i = 1,\dots,N_k
+\right\},
+\label{eq:output_pc}
+\end{equation}
+
+\noindent representing the reconstructed nominal geometry corresponding to the damaged partition $\mathcal{P}_k$.
+
+Unlike conventional completion formulations, reconstruction is not treated as a global point-generation problem. Instead, the point set remains fixed and reconstruction is formulated as constrained displacement estimation restricted to points identified as damaged. The reconstruction rule is therefore defined as
+
+\begin{equation}
+\mathbf{p}_{k_i}^{*} =
+\begin{cases}
+\mathbf{p}_{k_i},
+& \text{if } \ell_i = 0,
+\\[4pt]
+\mathbf{p}_{k_i} + \Delta \mathbf{p}_{k_i},
+& \text{if } \ell_i = 1,
+\end{cases}
+\label{eq:reconstruction_rule}
+\end{equation}
+
+\noindent where $\Delta \mathbf{p}_{k_i} \in \mathbb{R}^{3}$ denotes the predicted displacement vector associated with the damaged point $\mathbf{p}_{k_i}$.
+
+Within this formulation, intact geometry is propagated directly through the reconstruction process, while geometric correction is restricted to the damaged subset. Preservation of intact geometry is therefore enforced structurally through the reconstruction rule itself rather than indirectly through optimization constraints or regularization terms.
+
+The learning objective is consequently defined as estimating a mapping
+
+\begin{equation}
+f_{\theta} :
+(\mathcal{P}_k,\mathcal{L}_k)
+\rightarrow
+\{\Delta \mathbf{p}_{k_i}\}_{i:\ell_i = 1},
+\label{eq:mapping}
+\end{equation}
+
+\noindent parameterized by $\theta$, which predicts displacement vectors exclusively for points belonging to the damaged subset.
+
+% Consequently, the prediction domain is explicitly restricted to damaged points, eliminating the need to simultaneously learn corrective transformations for damaged regions and identity mappings for intact geometry.
+
+This restriction explicitly defines the prediction domain of the reconstruction process. Unlike unconstrained displacement formulations, the model is not required to simultaneously learn corrective transformations for damaged regions and identity mappings for intact geometry. As a result, all predicted displacements contribute directly to the reconstruction objective, improving optimization efficiency under sparse damage conditions.
+
+Supervision is provided by the nominal partition $\mathcal{P}_{k}^{gt}$ through a geometric reconstruction loss computed exclusively on damaged points:
+
+\begin{equation}
+\mathcal{L} =
+\mathcal{D}
+\left(
+\{\mathbf{p}_{k_i}^{*} \mid \ell_i = 1\},
+\{\mathbf{p}_{k_i}^{gt} \mid \ell_i = 1\}
+\right),
+\label{eq:loss}
+\end{equation}
+
+\noindent where $\mathcal{D}(\cdot,\cdot)$ denotes a geometric distance metric defined between point sets.
+
+This formulation differs fundamentally from standard \ac{pc} completion approaches in three aspects. First, damaged regions are modeled as localized geometric deviations rather than missing observations. Second, reconstruction is explicitly constrained to points identified as damaged through point-wise labels. Third, preservation of intact geometry is enforced structurally through the reconstruction rule itself rather than indirectly through loss penalization.
+
+Together, these characteristics motivate reconstruction strategies based on constrained displacement estimation, where prediction-domain restriction is directly aligned with the localized spatial structure of material loss.
+
+\subsection{Completion-Based Reconstruction}
+\label{sec:completion_methods}
+
+Completion-based reconstruction methods formulate geometry recovery as a global shape generation problem, where incomplete observations are encoded into a latent representation and subsequently decoded into a reconstructed \ac{pc}. In this formulation, reconstruction is performed through point generation rather than direct geometric correction of existing points. 
+
+Under repair-oriented conditions, reconstruction is required only within localized damaged regions, while most of the observed geometry remains available and geometrically reliable. 
+
+To establish completion-based reference baselines, this work evaluates the \ac{pcn} \cite{Yuan2019} architecture together with a localized label-guided variant termed \ac{lrpcn}.
+
+\ac{pcn} follows a coarse-to-fine encoder--decoder architecture. Given an input \ac{pc} partition \(\mathcal{P}_k\), the encoder extracts per-point features using shared \acp{mlp}, followed by a symmetric max-pooling operation that aggregates these features into a global latent descriptor \(\mathbf{z} \in \mathbb{R}^{d}\).
+
+% \begin{equation}
+% \mathbf{z} \in \mathbb{R}^{d}.
+% \end{equation}
+
+The decoder reconstructs geometry from this latent representation through a two-stage generation process comprising coarse point generation followed by per-point offset refinement. Reconstruction is therefore performed globally, generating a fixed-size output \ac{pc} independently of the spatial distribution or extent of damage.
+
+Although this formulation is effective for generic completion tasks, it remains poorly aligned with localized repair reconstruction. The decoder must infer the complete surface geometry from a compressed global latent representation, despite only a small subset of the geometry requiring correction. Furthermore, intact geometry is not preserved explicitly, since the entire surface is regenerated through the decoding process.
+
+To investigate the influence of explicit damage localization within a completion-based paradigm, a localized variant termed \ac{lrpcn} (Fig.~\ref{fig:Figure_2_7}) is introduced. This adaptation preserves the original encoder--decoder structure of \ac{pcn} while incorporating damage-aware conditioning to guide reconstruction toward the damaged regions.
+
+\begin{figure*}[h]
+\centering
+\includegraphics[width=1.0\textwidth]{figs/Figure_2_7.png}
+\caption{
+Overview of the \ac{lrpcn} architecture. The input \ac{pc}, augmented with damage labels, is processed by a PointNet-based encoder to extract a global latent representation. Statistics of the damaged points, including centroid and spatial dispersion, are concatenated with the latent vector to provide coarse localization information. The decoder generates reconstruction points corresponding to the damaged region through a spatially-conditioned MLP generation process. Generated points are subsequently merged with intact input geometry, which is preserved unchanged.
+}
+\label{fig:Figure_2_7}
+\end{figure*}
+
+The encoder processes the input partition augmented with point-wise damage labels, enabling the latent representation to jointly encode global geometric structure and the spatial distribution of damage. As in the original formulation, all points, including intact regions, contribute to global feature extraction and contextual reasoning.
+
+Unlike standard \ac{pcn}, however, the decoder is configured to generate reconstruction points only for regions identified as damaged, consistent with the localized damage surface formulation introduced in Chapter~\ref{chap:ml-damage-detection}. Let
+% \begin{equation}
+% \mathcal{S} = \{\mathbf{p}_i \mid \ell_i = 1\}
+% \end{equation}
+
+
+\begin{equation}
+\mathcal{S}
+=
+\left\{
+\mathbf{p}_{k_i}
+\in \mathcal{P}_k
+\mid
+\ell_i = 1
+\right\}.
+\end{equation}
+
+denote the subset of damaged points. Two geometric statistics are computed from this subset to provide coarse localization information:
+
+% \begin{equation}
+% \mathbf{c} =
+% \frac{1}{|\mathcal{S}|}
+% \sum_{\mathbf{p}_i \in \mathcal{S}}
+% \mathbf{p}_i,
+% \quad
+% \mathbf{d} =
+% \sqrt{
+% \frac{1}{|\mathcal{S}|}
+% \sum_{\mathbf{p}_i \in \mathcal{S}}
+% (\mathbf{p}_i - \mathbf{c})^{2}
+% }.
+% \end{equation}
+
+\begin{equation}
+\mathbf{c} =
+\frac{1}{|\mathcal{S}|}
+\sum_{\mathbf{p}_i \in \mathcal{S}}
+\mathbf{p}_i,
+\label{eq:damage_centroid}
+\end{equation}
+
+\begin{equation}
+\mathbf{d} =
+\sqrt{
+\frac{1}{|\mathcal{S}|-1}
+\sum_{\mathbf{p}_i \in \mathcal{S}}
+(\mathbf{p}_i - \mathbf{c})^{2}
+},
+\label{eq:damage_dispersion}
+\end{equation}
+
+Here, \(\mathbf{c} \in \mathbb{R}^{3}\) represents the centroid of the damaged region, while \(\mathbf{d} \in \mathbb{R}^{3}\) characterizes its spatial dispersion. These descriptors are concatenated with the latent representation to form an augmented representation
+% \begin{equation}
+% \mathbf{z}' =
+% [\mathbf{z}
+% \;\|\;
+% \mathbf{c}
+% \;\|\;
+% \mathbf{d}],
+% \end{equation}
+
+\begin{equation}
+\mathbf{z}' =
+[\mathbf{z},
+\mathbf{c},
+\mathbf{d}],
+\end{equation}
+
+which conditions the decoder during reconstruction. The centroid provides coarse spatial localization of the damaged region, while the spatial dispersion encodes its approximate geometric extent. Together, these descriptors guide the decoder toward the reconstruction region without substantially increasing architectural complexity.
+
+The decoder subsequently generates reconstruction points corresponding only to damaged geometry. These generated points are then merged with intact input points, which are propagated directly without modification, yielding the final reconstructed partition.
+
+This adaptation preserves the completion-based generation paradigm while incorporating explicit damage-awareness and localized reconstruction support. Nevertheless, reconstruction remains driven primarily by a compressed global latent representation rather than direct geometric correction of existing points. Consequently, \ac{lrpcn} enables analysis of how far explicit damage localization alone can improve completion-based reconstruction before the generation paradigm itself becomes the dominant limitation.
+
+% A schematic overview of the \ac{lrpcn} architecture is presented in Fig.~\ref{fig:Figure_2_7}.
+
+
+Although \ac{pcn} and \ac{lrpcn} do not follow the constrained displacement formulation introduced in Section~\ref{sec:problem_formulation}, they provide important reference baselines for evaluating the influence of reconstruction paradigm under repair-oriented conditions. In particular, they enable direct comparison between global geometry generation and localized geometric correction strategies.
+
+\subsection{Displacement-Based Reconstruction}
+\label{sec:displacement_methods}
+
+Displacement-based reconstruction formulates nominal geometry recovery as a geometric correction problem in which existing points are adjusted through predicted displacement vectors rather than regenerated through global completion. Under localized repair conditions, this paradigm is naturally better aligned with the reconstruction task, since damaged points already exist near the nominal surface and therefore primarily require geometric correction rather than complete regeneration.
+
+Given an input \ac{pc} partition \(\mathcal{P}_k\), the objective is to estimate a mapping
+
+\begin{equation}
+f_{\theta} :
+\mathcal{P}_k
+\rightarrow
+\{\Delta \mathbf{p}_{k_i}\}_{i=1}^{N_k}.
+\end{equation}
+
+where $\Delta \mathbf{p}_i \in \mathbb{R}^{3}$ denotes a predicted displacement vector associated with point $\mathbf{p}_i$. The reconstructed geometry is subsequently obtained as
+
+\begin{equation}
+\mathbf{p}_{k_i}^{*}
+=
+\mathbf{p}_{k_i}
++
+\Delta \mathbf{p}_{k_i}.
+\end{equation}
+
+Unlike the constrained and label-guided formulation introduced previously, the displacement-based baselines considered here operate without explicit damage localization at the input level. Only geometric coordinates are provided to the network as input. The damage labels
+\(\mathcal{L}_k\), although available in the dataset, are withheld from the network input during training and inference. However, they are used during training to compute region-specific loss terms, separating damaged from intact point supervision. Consequently, the model must simultaneously infer which regions require correction and estimate the corresponding geometric displacements.
+
+Two unconstrained displacement-based baselines are evaluated in this work. The first baseline follows a PointNet-based formulation inspired by the denoising architecture PointCleanNet \cite{Marie2019}. The input \ac{pc} is processed through shared \acp{mlp} that extract per-point features combining local geometric descriptors and global contextual information. A shared regression head subsequently predicts an independent displacement vector for each point. \cite{FlowNet3D2019}, which incorporates explicit local neighborhood reasoning through \ac{knn} graph construction and edge-based feature aggregation. Local geometric interactions are therefore modeled explicitly prior to displacement estimation, enabling the network to capture neighborhood-dependent geometric transformations.
+
+% In both formulations, displacement prediction is performed over the entire point set independently of whether points belong to damaged or intact regions. The prediction domain therefore coincides with the complete input partition:
+
+% \begin{equation}
+% \{\mathbf{p}_i\}_{i=1}^{N}.
+% \end{equation}
+
+In both formulations, displacement prediction is performed over all points in the input partition \(\mathcal{P}_k\), regardless of whether they belong to damaged or intact regions. As a consequence, geometric correction and intact-region preservation become implicitly coupled within the same optimization process. The network must simultaneously learn corrective transformations for damaged regions while maintaining near-zero displacement for intact geometry. This formulation introduces an inherent optimization imbalance under sparse repair conditions, where damaged points typically constitute only a small fraction of the overall geometry. A substantial portion of the predictive capacity is therefore allocated to learning identity mappings for intact regions rather than localized geometric correction.
+
+Furthermore, because displacement prediction is performed globally, all points contribute equally to the regression process regardless of whether correction is actually required. As a result, the optimization objective does not explicitly align the prediction domain with the spatial structure of material loss.
+
+These baselines therefore establish a reference formulation for unconstrained displacement reconstruction, enabling direct comparison with label-guided approaches that explicitly restrict prediction to damaged regions.
+
+\subsection{SeedDispNet: Label-Guided Seed Displacement}
+\label{sec:seeddispnet}
+
+To address the limitations of unconstrained displacement reconstruction under localized damage conditions, this work proposes SeedDispNet, a label-guided displacement architecture that explicitly restricts reconstruction to points identified as damaged (Fig.~\ref{fig:Figure_3_7}). In the proposed formulation, damaged points are treated as reconstruction seeds, and displacement prediction is performed exclusively on this subset. This directly aligns the prediction domain with the spatial extent of material loss, consistent with the constrained reconstruction formulation introduced in Section~\ref{sec:problem_formulation}.
+
+\begin{figure*}[h]
+\centering
+\includegraphics[width=1.0\textwidth]{figs/Figure_3_7.png}
+\caption{Overview of the proposed SeedDispNet architecture. The input \ac{pc}, augmented with damage labels, is processed through global and local feature extraction branches. Points labeled as damaged are selected as reconstruction seeds. For each seed point, spatial coordinates, local descriptors, and global contextual information are concatenated and processed through a shared displacement prediction head. Predicted displacements are applied exclusively to damaged points, while intact geometry is propagated directly through the reconstruction process, resulting in localized geometric correction constrained to damaged regions.}
+\label{fig:Figure_3_7}
+\end{figure*}
+
+Given a labeled partition \((\mathcal{P}_k,\mathcal{L}_k)\), the network extracts two complementary geometric representations. A global encoder processes the complete labeled \ac{pc} using a PointNet-based architecture, producing a global feature descriptor \(\mathbf{z} \in \mathbb{R}^{512}\), which captures both the global surface structure and the spatial distribution of damage. In parallel, a local encoder computes point-wise geometric descriptors \(\mathbf{f}_{k_i}^{\text{local}} \in \mathbb{R}^{256}\) using shared \ac{mlp} operations that encode fine-scale geometric structure around each point. Points satisfying $\ell_i = 1$ are subsequently selected as reconstruction seeds, defining the subset \(\mathcal{S}\).
+
+This seed selection explicitly defines the prediction domain of the reconstruction process. In contrast to \ac{lrpcn}, where labels condition global point generation, SeedDispNet restricts displacement estimation directly to the damaged subset. Consequently, all predicted displacements contribute directly to geometric reconstruction rather than partially allocating model capacity to learning identity mappings for intact regions.
+
+For each seed point $\mathbf{p}_i \in \mathcal{S}$, a feature representation is constructed by concatenating spatial coordinates, local descriptors, and the global feature vector:
+
+% \begin{equation}
+% \mathbf{h}_i =
+% \left[
+% \mathbf{p}_{k_i}
+% \;\|\;
+% \mathbf{f}_{k_i}^{\text{local}}
+% \;\|\;
+% \mathbf{z}
+% \right].
+% \end{equation}
+
+\begin{equation}
+\mathbf{h}_i =
+\left[
+\mathbf{p}_{k_i},
+\mathbf{f}_{k_i}^{\text{local}},
+\mathbf{z}
+\right] \in \mathbb{R}^{771},
+\end{equation}
+
+\noindent where the concatenation combines spatial coordinates ($3$), local descriptors ($256$), and the global feature ($512$).
+
+A shared displacement prediction head then maps each feature vector to a displacement estimate:
+
+\begin{equation}
+\Delta \mathbf{p}_{k_i}
+=
+g_{\theta}(\mathbf{h}_i),
+\qquad
+\mathbf{p}_{k_i} \in \mathcal{S}.
+\end{equation}
+
+The shared mapping $g_{\theta}$ is implemented using a multilayer perceptron applied independently to all seed points. This formulation ensures a consistent displacement estimation function across the damaged subset while preserving point-wise prediction flexibility.
+
+The reconstructed partition is subsequently obtained according to the reconstruction rule defined in Eq.~(\ref{eq:reconstruction_rule}), where intact points are propagated directly through the reconstruction process while displacement prediction is applied exclusively to damaged points.
+
+Unlike completion-based approaches, reconstruction is therefore formulated as localized geometric correction rather than global point generation. Furthermore, unlike unconstrained displacement methods, prediction is restricted exclusively to points requiring correction. This structurally decouples geometric restoration from intact-region preservation within the reconstruction process itself.
+
+Since the number of predicted points corresponds directly to the number of damaged points, the reconstruction output adapts naturally to the spatial extent of the damaged region while preserving point-wise correspondence with the input partition.
+
+Overall, SeedDispNet formulates nominal reconstruction as constrained displacement estimation guided by explicit damage localization, where displacement prediction is applied exclusively to damaged regions while intact geometry is propagated directly through the reconstruction process. 
+
+% A schematic overview of the proposed SeedDispNet architecture is illustrated in Fig.~\ref{fig:Figure_3_7}.
+
+\subsection{Loss Functions}
+\label{sec:loss_functions}
+
+To ensure a fair comparison across reconstruction paradigms, each method is optimized using a supervisory formulation aligned with its reconstruction strategy. In all cases, supervision is derived from the nominal ground-truth partition $\mathcal{P}_{k}^{gt}$ introduced in Section~\ref{sec:problem_formulation}.
+
+For completion-based and label-guided reconstruction approaches, supervision is based on the bidirectional \ac{cd}, which measures geometric discrepancy between unordered point sets while remaining invariant to point ordering. Given a reconstructed point set $\mathcal{P}_{pred}$ and a ground-truth point set $\mathcal{P}_{gt}$, \ac{cd} is defined as
+
+\begin{equation}
+\text{CD}(\mathcal{P}_{pred}, \mathcal{P}_{gt}) =
+\frac{1}{|\mathcal{P}_{pred}|}
+\sum_{\mathbf{p} \in \mathcal{P}_{pred}}
+\min_{\mathbf{q} \in \mathcal{P}_{gt}}
+\|\mathbf{p} - \mathbf{q}\|_2^2
++
+\frac{1}{|\mathcal{P}_{gt}|}
+\sum_{\mathbf{q} \in \mathcal{P}_{gt}}
+\min_{\mathbf{p} \in \mathcal{P}_{pred}}
+\|\mathbf{q} - \mathbf{p}\|_2^2.
+\label{eq:cd}
+\end{equation}
+
+% Here, $\mathcal{P}_{pred}$ and $\mathcal{P}_{gt}$ correspond to reconstructed and ground-truth point sets, respectively.
+
+For \ac{pcn}, \ac{cd} is computed over the entire reconstructed \ac{pc}, reflecting the global completion formulation of the method. Since \ac{pcn} regenerates the complete geometry without preserving point-wise correspondence, set-based supervision is required.
+
+In contrast, the label-guided approaches \ac{lrpcn} and SeedDispNet restrict supervision exclusively to damaged regions:
+% \begin{equation}
+% \mathcal{P}_{k,d}^{gt} =
+% \{\mathbf{p}_i^{gt} \mid \ell_i = 1\}.
+% \end{equation}
+
+\begin{equation}
+\mathcal{P}_{k,d}^{gt}
+=
+\left\{
+\mathbf{p}_{k_i}^{gt}
+\in
+\mathcal{P}_{k}^{gt}
+\mid
+\ell_i = 1
+\right\}.
+\end{equation}
+
+This restriction aligns the supervision signal with the localized reconstruction objective while preventing optimization from being dominated by intact geometry, which typically represents the majority of points under repair-oriented conditions.
+
+For \ac{lrpcn}, reconstruction remains generation-based, and supervision is therefore formulated using \ac{cd}. However, an additional coverage regularization term is introduced to encourage spatial distribution of generated reconstruction points across the damaged region. The final objective is defined as
+
+\begin{equation}
+\mathcal{L}_{\text{LR-PCN}} =
+\text{CD}(\hat{\mathcal{P}}, \mathcal{P}_{k,d}^{gt})
++
+\lambda_{\text{cov}}
+\mathcal{L}_{\text{cov}},
+\end{equation}
+where $\hat{\mathcal{P}}$ denotes the set of generated reconstruction points prior to merging with intact geometry.
+
+The coverage term is defined as
+% \begin{equation}
+% \mathcal{L}_{cov} =
+% \frac{1}{N_d}
+% \sum_{\mathbf{p}_i^{gt}:\ell_i=1}
+% \min_{\mathbf{p}_j \in \hat{\mathcal{P}}}
+% \|\mathbf{p}_i^{gt} - \mathbf{p}_j\|_2^2.
+% \end{equation}
+
+\begin{equation}
+\mathcal{L}_{\text{cov}}
+=
+\frac{1}{N_d}
+\sum_{\mathbf{p}_{k_i}^{gt}\in \mathcal{P}_{k,d}^{gt}}
+\min_{\mathbf{p}_j \in \hat{\mathcal{P}}}
+\|
+\mathbf{p}_{k_i}^{gt}
+-
+\mathbf{p}_j
+\|_2 .
+\end{equation}
+
+This formulation encourages generated points to distribute across the target region rather than collapsing into localized geometric minima.
+
+In the experiments, $\lambda_{\text{cov}} = 0.5$, balancing geometric accuracy and spatial coverage. Using \ac{cd} alone may encourage solutions in which generated points concentrate around regions minimizing average distance while underrepresenting other portions of the damaged surface. The coverage term mitigates this behavior by explicitly encouraging reconstruction support across all target points.
+
+For unconstrained displacement-based baselines, namely PointCleanNet and FlowNet3D, reconstruction is instead formulated as a point-wise regression problem with explicit point correspondence. Since these methods preserve point identities and predict one displacement vector per input point, supervision is formulated using an \ac{mpl2} loss combined with a preservation regularization term:
+
+% \begin{equation}
+% \mathcal{L}_{L2} =
+% \frac{1}{N_d}
+% \sum_{i:\ell_i = 1}
+% \|\mathbf{p}_i^{*} - \mathbf{p}_i^{gt}\|_2^2
+% +
+% \lambda_{pres}
+% \frac{1}{N_i}
+% \sum_{i:\ell_i = 0}
+% \|\mathbf{p}_i^{*} - \mathbf{p}_i\|_2^2,
+% \label{eq:l2_disp}
+% \end{equation}
+
+\begin{equation}
+\mathcal{L}_{L2}
+=
+\frac{1}{N_d}
+\sum_{i:\ell_i = 1}
+\|
+\mathbf{p}_{k_i}^{*}
+-
+\mathbf{p}_{k_i}^{gt}
+\|_2^2
++
+\lambda_{pres}
+\frac{1}{N_i}
+\sum_{i:\ell_i = 0}
+\|
+\mathbf{p}_{k_i}^{*}
+-
+\mathbf{p}_{k_i}
+\|_2^2 .
+\label{eq:l2_disp}
+\end{equation}
+
+where $N_d$ and $N_i$ denote the number of damaged and intact points, respectively, and $\lambda_{pres}$ controls the strength of the preservation penalty. The first term supervises geometric correction within damaged regions, whereas the second term penalizes unnecessary modification of intact geometry. In the experiments, $\lambda_{pres} = 0.1$, introducing a soft preservation constraint that discourages geometric drift in intact regions without dominating the reconstruction objective.
+
+This weighting reflects the coupled optimization structure of unconstrained displacement methods. Since displacement prediction is performed over the entire point set, the network must simultaneously learn corrective transformations for damaged points while maintaining near-zero displacement for intact geometry. Setting $\lambda_{pres}=0$ removes any preservation constraint and allows arbitrary modification of intact regions, whereas excessively large values suppress corrective reconstruction behavior by prioritizing preservation.
+
+Although SeedDispNet also follows a displacement-based formulation, supervision is intentionally based on \ac{cd} rather than direct point-wise regression. Specifically, the variant used for SeedDispNet employs the mean bidirectional nearest-neighbour L1 distance (unsquared), in contrast to the squared formulation in Eq.~(\ref{eq:cd}) used for training the completion-based methods. Preliminary experiments showed that correspondence-based \ac{mpl2} supervision encouraged over-smoothed displacement predictions and spatial collapse toward localized regions. This behavior arises because direct regression tends to average displacement estimates under spatially heterogeneous deformation patterns, producing geometrically compact solutions that minimize average error while failing to preserve distributed surface geometry.
+
+In contrast, \ac{cd} encourages the predicted points to collectively approximate the target surface distribution through bidirectional nearest-neighbor matching. Importantly, the bidirectional formulation penalizes both missing target regions and collapsed predictions, encouraging reconstruction points to distribute across the entire damaged surface rather than converging toward localized geometric averages.
+
+Under unconstrained displacement prediction, however, directly applying \ac{cd} may produce unstable solutions because the loss does not enforce explicit one-to-one point correspondence across the complete point set.
+
+Consequently, the constrained prediction-domain formulation enables \ac{cd} to operate as a stable supervisory signal for localized displacement estimation while simultaneously promoting distributed surface reconstruction across the damaged region.
+
+Overall, the adopted loss formulations reflect the structural differences between the evaluated reconstruction paradigms. Completion-based methods rely primarily on set-based geometric similarity, unconstrained displacement methods require explicit balancing between reconstruction and preservation objectives through point-wise regression, and the proposed constrained displacement formulation enables localized set-based supervision restricted exclusively to damaged regions while preserving intact geometry structurally rather than through optimization penalties.
+
+\subsection{Method Comparison Summary}
+\label{sec:method_summary}
+
+The evaluated methods span two fundamentally different reconstruction paradigms: completion-based reconstruction and displacement-based geometric correction. These approaches differ not only in architectural design, but also in how reconstruction locality, incorporation of damage information, supervision, and intact-region preservation are incorporated into the reconstruction process. Table~\ref{tab:method_comparison} summarizes the principal architectural and methodological characteristics of the evaluated approaches.
+
+\begin{table*}[h]
+\centering
+\small
+\caption{Comparison of reconstruction paradigms and architectural properties across evaluated methods.}
+\label{tab:method_comparison}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{l c c c c c}
+\hline
+\textbf{Property} &
+\textbf{PCN \cite{Yuan2019}} &
+\textbf{LR-PCN} &
+\textbf{PointCleanNet \cite{Marie2019}} &
+\textbf{FlowNet3D \cite{FlowNet3D2019}} &
+\textbf{SeedDispNet (Ours)} \\
+\hline
+Reconstruction paradigm & Completion & Completion & Displacement & Displacement & Label-guided displacement \\
+Input representation & XYZ & XYZ + label & XYZ & XYZ & XYZ + label \\
+Label usage & None & Input + loss & Supervision only & Supervision only & Input + selection + loss \\
+Prediction domain & Full cloud & Damaged region (generated) & Full cloud & Full cloud & Damaged region (seeds) \\
+Output size & Fixed & Fixed & Fixed & Fixed & Damage-adaptive \\
+Preservation mechanism & None & Merge-based & Loss-based & Loss-based & Structural \\
+Loss computation & Full cloud & Damaged region & Damaged + preservation & Damaged + preservation & Damaged region \\
+Local feature modeling & No & No & PointNet per-point & k-NN & PointNet per-point \\
+\hline
+\end{tabular}
+}
+\end{table*}
+
+\ac{pcn} establishes a global completion baseline in which reconstruction is formulated as full point-set generation from partial observations. In this formulation, the complete \ac{pc} is reconstructed independently of whether points belong to intact or damaged geometry.
+
+PointCleanNet and FlowNet3D shift the reconstruction paradigm from generation to displacement estimation. Instead of synthesizing new geometry, these methods estimate per-point geometric corrections directly on the input surface. This formulation is more naturally aligned with repair-oriented reconstruction because damaged points already exist near the nominal surface and therefore primarily require geometric correction.
+
+However, both methods remain unconstrained displacement formulations. Since displacement prediction is performed over the complete point set without explicit damage localization, the network must simultaneously learn corrective transformations for damaged regions and identity mappings for intact geometry. Consequently, geometric correction and preservation become implicitly coupled within the same optimization process.
+
+The proposed SeedDispNet reformulates displacement prediction through explicit prediction-domain restriction. By selecting damaged points as reconstruction seeds while propagating intact points directly through the reconstruction process, displacement estimation is constrained exclusively to regions requiring correction.
+
+A central distinction between the evaluated methods therefore concerns how preservation of intact geometry is enforced. In completion-based methods such as \ac{lrpcn}, preservation is implemented through a merge-based mechanism in which intact input points are propagated and merged with generated reconstruction points corresponding to damaged regions. 
+
+In unconstrained displacement formulations, preservation is enforced indirectly through regularization within the regression objective, requiring the network to jointly optimize geometric correction and intact-region preservation.
+
+SeedDispNet differs fundamentally by enforcing preservation structurally through the reconstruction formulation itself. Since intact points are excluded from the prediction domain, preservation becomes an inherent property of the reconstruction process rather than a learned optimization behavior.
+
+These progressively stronger structural constraints directly influence reconstruction locality, supervision complexity, optimization efficiency, and geometric consistency under repair-oriented conditions.
+
+More broadly, the evaluated methods represent a progression from global unconstrained reconstruction toward explicitly localized and damage-aware geometric correction. This progression enables systematic analysis of how reconstruction formulation, supervision strategy, and prediction-domain restriction influence nominal geometry recovery under localized repair conditions.
+
+\section{Experimental Setup}
+\label{sec:experimental_setup}
+
+This section presents the experimental protocol used to train and evaluate the reconstruction methods introduced in Section~\ref{sec:methods}. The objective is to establish a controlled evaluation framework enabling direct comparison between completion-based, unconstrained displacement-based, and constrained displacement-based reconstruction paradigms under repair conditions. All methods are evaluated using the same dataset partitions, preprocessing pipeline, and evaluation protocol. At the same time, each approach is trained according to its native reconstruction formulation and supervisory strategy, ensuring that performance differences primarily reflect the underlying reconstruction paradigm rather than implementation-specific variations.
+
+\subsection{Dataset and Protocol}
+\label{sec:dataset_protocol}
+
+All methods are trained and evaluated on the DMSurface dataset introduced in Section~\ref{sec:dataset_7}. The dataset is divided into training, validation, and test sets at the surface level, ensuring that evaluation geometries remain unseen during training.
+
+Each sample corresponds to a local surface partition
+\begin{equation}
+\mathcal{P}_{k} = \{(\mathbf{p}_i, \ell_i)\}_{i=1}^{N},
+\quad
+N = 2048,
+\end{equation}
+where $\mathbf{p}_i \in \mathbb{R}^3$ denotes the point coordinates and $\ell_i \in \{0,1\}$ indicates whether the point belongs to intact or damaged geometry.
+
+Only partitions containing both damaged and intact geometry are used during training and evaluation, since the objective is to learn localized geometric reconstruction in the presence of surrounding intact surface context. Partitions containing exclusively damaged points do not provide sufficient geometric context for localized nominal inference, while partitions containing only intact points do not provide meaningful reconstruction supervision.
+
+To ensure fair comparison, all methods are trained and evaluated using identical input partitions, dataset splits, preprocessing procedures, and evaluation metrics. However, label information is provided only to the label-guided approaches, namely \ac{lrpcn} and SeedDispNet. \ac{pcn} and the unconstrained displacement baselines operate without explicit damage localization, consistent with their original formulations. This protocol enables systematic evaluation of how reconstruction paradigm, explicit damage localization, and prediction-domain restriction influence localized nominal reconstruction behavior under controlled repair-oriented conditions.
+
+\subsection{Data Preprocessing}
+\label{sec:data_preprocessing}
+
+All partitions are independently normalized prior to training and evaluation. The preprocessing pipeline operates exclusively on geometric coordinates, while binary damage labels remain unchanged.
+
+Given an input partition $\mathcal{P}_{k}$, centering is first performed by subtracting the centroid:
+\begin{equation}
+\boldsymbol{\mu} = \frac{1}{N} \sum_{i=1}^{N} \mathbf{p}_i,
+\quad
+\tilde{\mathbf{p}}_i = \mathbf{p}_i - \boldsymbol{\mu}.
+\end{equation}
+
+Scale normalization is subsequently applied using the maximum Euclidean distance from the origin:
+\begin{equation}
+r = \max_i \|\tilde{\mathbf{p}}_i\|_2,
+\quad
+\hat{\mathbf{p}}_i = \frac{\tilde{\mathbf{p}}_i}{r}.
+\end{equation}
+
+This transformation maps each partition into a unit sphere centered at the origin, ensuring that
+\begin{equation}
+\|\hat{\mathbf{p}}_i\|_2 \leq 1.
+\end{equation}
+
+The same normalization parameters $(\boldsymbol{\mu}, r)$ computed from the damaged partition are subsequently applied to the corresponding nominal ground-truth partition:
+\begin{equation}
+\hat{\mathbf{p}}_i^{gt} =
+\frac{\mathbf{p}_i^{gt} - \boldsymbol{\mu}}{r}.
+\end{equation}
+
+Applying shared normalization to both damaged and nominal partitions preserves geometric consistency between input and target representations while maintaining point-wise correspondence. Consequently, the models learn localized geometric reconstruction independently of arbitrary translation and scale variations.
+
+This normalization is particularly important for displacement-based reconstruction, where the objective consists of estimating localized geometric corrections directly in coordinate space. Bounding all partitions within a consistent coordinate range stabilizes displacement magnitudes, improves numerical conditioning during optimization, and facilitates convergence across different reconstruction paradigms.
+
+\subsection{Training Configuration}
+\label{sec:training_configuration}
+
+All models are implemented in PyTorch and trained on a single NVIDIA RTX 3080 GPU. Optimization is performed using the Adam optimizer with parameters $\beta_1 = 0.9$, $\beta_2 = 0.999$, and weight decay of $10^{-4}$.
+
+To account for differences in reconstruction formulation and optimization behavior, learning rates are selected according to the characteristics of each reconstruction paradigm. Completion-based methods are trained with an initial learning rate of $5 \times 10^{-4}$, while displacement-based methods use an initial learning rate of $10^{-3}$. In all experiments, a step-based learning rate schedule is employed, where the learning rate is reduced by a factor of $0.7$ every 80 epochs.
+
+All models are trained for 500 epochs using a batch size of 24. For displacement-based methods, gradient clipping with a maximum norm of 1.0 is additionally applied to improve optimization stability and mitigate excessively large displacement updates during training.
+
+Each method is optimized using the supervisory formulation corresponding to its reconstruction paradigm, as defined in Section~\ref{sec:loss_functions}. This ensures that all approaches are evaluated under a consistent experimental framework while preserving the assumptions and optimization objectives intrinsic to each formulation.
+
+Model selection is performed using validation performance computed exclusively over damaged regions, consistent with the localized reconstruction objective of the proposed repair framework. This prevents validation performance from being dominated by intact geometry, which represents the majority of points under sparse repair conditions.
+
+% The checkpoint achieving the best validation performance is subsequently used for final evaluation on the test set. \textcolor{blue}{short sentence}
+
+\subsection{Data Augmentation}
+\label{sec:data_augmentation}
+
+Data augmentation is applied during training to improve geometric robustness and generalization to previously unseen surface configurations.
+
+Each input partition undergoes a random geometric transformation consisting of a rotation around the vertical axis and a uniform scaling factor sampled from the interval $[0.95, 1.05]$. The same transformation is consistently applied to both the damaged input partition and its corresponding nominal ground-truth partition, preserving geometric correspondence and relative displacement relationships between them.
+
+To simulate acquisition uncertainty and measurement variability commonly observed in \ac{3d} scanning, Gaussian jitter is additionally applied to the input points only. The noise is sampled from a zero-mean Gaussian distribution with standard deviation $\sigma = 0.01$.
+
+Applying noise exclusively to the input encourages the models to learn robust geometric reconstruction under imperfect observations while preserving clean supervisory targets during optimization.
+
+These augmentation strategies are intended to improve robustness to geometric variability, scale differences, and acquisition noise while preserving the localized geometric structure required for reconstruction.
+
+\subsection{Evaluation Metrics}
+\label{sec:metrics}
+
+To comprehensively evaluate reconstruction performance under repair-oriented conditions, five complementary reconstruction metrics are computed on the test set, together with a computational efficiency measure. The reconstruction metrics assess global geometric similarity, localized reconstruction accuracy within damaged regions, preservation of intact geometry, and robustness to localized reconstruction failures. All reconstruction metrics are reported in millimetres~(mm), obtained by inverting the per-sample normalization scale $r$ applied during preprocessing.
+
+Reconstruction accuracy is first evaluated using the bidirectional \ac{cd}. For evaluation purposes, \ac{cd} is computed as the mean bidirectional nearest-neighbour L1 distance:
+\begin{equation}
+\text{CD}_{\text{eval}}(\mathcal{P}_{pred}, \mathcal{P}_{gt}) =
+\frac{1}{|\mathcal{P}_{pred}|}
+\sum_{\mathbf{p} \in \mathcal{P}_{pred}}
+\min_{\mathbf{q} \in \mathcal{P}_{gt}}
+\|\mathbf{p} - \mathbf{q}\|_2
++
+\frac{1}{|\mathcal{P}_{gt}|}
+\sum_{\mathbf{q} \in \mathcal{P}_{gt}}
+\min_{\mathbf{p} \in \mathcal{P}_{pred}}
+\|\mathbf{q} - \mathbf{p}\|_2.
+\label{eq:cd_eval}
+\end{equation}
+Note that this evaluation form uses unsquared L1 distances, consistent with standard evaluation practice in point cloud completion literature~\cite{Yuan2019}, as opposed to the squared formulation used during training (Eq.~\ref{eq:cd}). \ac{cd} measures geometric similarity between unordered point sets through nearest-neighbour matching while remaining invariant to point ordering. 
+
+Two \ac{cd} variants are considered. The first metric, denoted ${CD}_{full}$, is computed over the entire reconstructed \ac{pc} and evaluates overall geometric reconstruction quality. However, because intact geometry typically represents the majority of points, ${CD}_{full}$ may underestimate reconstruction errors localized within damaged regions.
+
+To isolate reconstruction performance specifically within regions requiring correction, a localized variant denoted ${CD}_{dam}$ is additionally computed exclusively on points satisfying $\ell_i = 1$. This metric directly evaluates the ability of each method to reconstruct damaged geometry independently of intact-region preservation.
+
+To further evaluate reconstruction accuracy, the mean nearest-neighbour displacement error on damaged points is computed as
+
+\begin{equation}
+\mathrm{MDE} =
+\frac{1}{N_d}
+\sum_{i:\ell_i=1}
+\min_{\mathbf{q} \in \mathcal{P}_{gt,d}}
+\|\mathbf{p}_i^* - \mathbf{q}\|_2.
+\end{equation}
+
+This metric measures the mean distance from each reconstructed damaged point to its nearest ground-truth target. For methods preserving point-wise correspondence (SeedDispNet), this is equivalent to direct per-point displacement error. For generation-based methods, it provides a one-directional proximity measure from prediction to target.
+
+To evaluate worst-case geometric deviations, the Hausdorff distance is additionally computed on damaged regions:
+
+\begin{equation}
+\mathrm{HD}(\mathcal{P}_{pred}, \mathcal{P}_{gt}) =
+\max \left\{
+\max_{\mathbf{p} \in \mathcal{P}_{pred}}
+\min_{\mathbf{q} \in \mathcal{P}_{gt}}
+\|\mathbf{p} - \mathbf{q}\|_2,
+\;
+\max_{\mathbf{q} \in \mathcal{P}_{gt}}
+\min_{\mathbf{p} \in \mathcal{P}_{pred}}
+\|\mathbf{q} - \mathbf{p}\|_2
+\right\}.
+\end{equation}
+
+Whereas \ac{cd} measures average geometric discrepancy, the Hausdorff distance captures the maximum deviation between reconstructed and target surfaces, making it particularly sensitive to localized reconstruction failures, sparse outliers, and incomplete surface recovery.
+
+Preservation of intact geometry is evaluated using the mean intact deviation error:
+
+\begin{equation}
+\mathrm{IDE} =
+\frac{1}{N_i}
+\sum_{i:\ell_i=0}
+\|\mathbf{p}_i^* - \mathbf{p}_i\|_2.
+\end{equation}
+
+This metric quantifies unintended geometric modifications introduced in regions that should remain unchanged during reconstruction. Ideally, intact geometry should be preserved exactly, yielding zero error.
+
+Finally, average inference time per sample is measured on GPU to evaluate computational efficiency and practical applicability within automated repair workflows.
+
+Together, these metrics explicitly separate global reconstruction quality, localized geometric correction accuracy, intact-region preservation, and robustness to reconstruction failures, which are often conflated in global set-similarity measures alone.
+
+During evaluation, reconstructed \acp{pc} are generated according to each reconstruction formulation. For completion-based methods, generated points are either used directly or merged with intact input geometry when applicable. For displacement-based methods, reconstructed geometry is obtained by applying predicted displacement vectors to the input points. All evaluation metrics are subsequently computed in physical units~(mm) by scaling back with the per-sample normalization factor $r$.
+
+\section{Results}
+\label{sec:results}
+
+This section evaluates the reconstruction methods introduced in Section~\ref{sec:methods} under the experimental protocol described in Section~\ref{sec:experimental_setup}. The objective is to analyze how different reconstruction paradigms behave under localized repair-oriented conditions, with particular emphasis on localized reconstruction accuracy, preservation of intact geometry, geometric consistency within damaged regions, and reconstruction robustness.
+
+The evaluated approaches include representative completion-based methods, unrestricted displacement-based baselines, and the proposed SeedDispNet formulation based on label-guided seed displacement. Results are analyzed using the complementary metrics introduced in Section~\ref{sec:metrics}, which separately quantify global geometric similarity, damaged-region reconstruction accuracy, correspondence-based displacement precision, intact-region preservation, robustness to localized failures, and computational efficiency.
+
+Beyond numerical comparison, the experiments are intended to investigate the progression of design decisions underlying localized nominal reconstruction. In particular, the evaluated methods progressively incorporate: explicit damage awareness through point-wise labels, transition from global point generation to geometric displacement prediction, and restriction of the prediction domain exclusively to damaged regions.
+
+This progression enables analysis of how reconstruction formulation, supervision strategy, and prediction-domain restriction influence reconstruction behavior under sparse and spatially localized damage conditions. Particular attention is therefore given not only to overall reconstruction accuracy, but also to the structural ability of each formulation to preserve intact geometry while recovering localized surface deviations.
+
+Additional analyses further investigate reconstruction behavior across varying surface geometries and damage configurations, including the influence of local feature extraction, geometric locality, and architectural complexity on reconstruction performance.
+
+\subsection{Reconstruction Performance Analysis}
+\label{sec:qt_results}
+
+Table~\ref{tab:main_results} presents the quantitative comparison across all evaluated methods on the DMSurface test set. The reported metrics evaluate complementary aspects of reconstruction performance, including global geometric consistency (${CD}_{full}$), localized reconstruction accuracy within damaged regions (${CD}_{dam}$, $\mathrm{MDE}$, and Hausdorff distance), preservation of intact geometry ($\mathrm{IDE}$), and computational efficiency.
+
+\begin{table*}[h]
+\small
+\centering
+\caption{Quantitative comparison on the DMSurface test set (surfaces 18--20). All distance metrics are reported in millimetres~(mm). Best results are highlighted in bold. $\downarrow$ indicates lower is better. Note that $\text{CD}_\text{full}$ for LR-PCN is artificially low because intact points (the majority) are passed through unchanged, dominating the mean; $\text{CD}_\text{dam}$ is the primary comparison metric for reconstruction quality.}
+\label{tab:main_results}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{l c c c c c c c}
+\hline
+\textbf{Method} & \textbf{Params} &
+\textbf{Time (ms)} &
+\textbf{{CD}$_\text{full}$ [mm]} $\downarrow$ &
+\textbf{{CD}$_\text{dam}$ [mm]} $\downarrow$ &
+\textbf{MDE [mm]} $\downarrow$ &
+\textbf{Hausdorff [mm]} $\downarrow$ &
+\textbf{IDE [mm]} $\downarrow$ \\
+\hline
+PCN & 1.66M & 1.03 & 0.2197~\pm 5.08  & -- & -- & -- & -- \\
+
+LR-PCN & 9.11M & 1.23 & 0.0112~\pm 0.02 & 0.6290~\pm 0.35 & 0.4909~\pm 0.22 & 1.0748~\pm 0.29 & \textbf{0.0}~\pm \textbf{0.0} \\
+
+PointCleanNet & 282k & \textbf{0.87} & 0.6089~\pm 0.11 & 0.5407~\pm 0.37 & 0.1914~\pm 0.20 & 0.6028~\pm 0.29 & 0.6399~\pm 0.12 \\
+
+FlowNet3D & 341K & 1.24 & 0.6438~\pm 0.12 & 0.5601~\pm 0.38 & 0.1956~\pm 0.20 & 0.6213~\pm 0.30 & 0.6548~\pm 0.12 \\
+
+SeedDispNet & 779K & 1.37 & \textbf{0.0057}~\pm \textbf{0.03} & \textbf{0.0423}~\pm \textbf{0.06} & \textbf{0.021}~\pm \textbf{0.29} & \textbf{0.0467}~\pm \textbf{0.06} & \textbf{0.0}~\pm \textbf{0.0} \\
+
+\hline
+\end{tabular}
+}
+\end{table*}
+
+Overall, SeedDispNet achieves the strongest performance across all localized reconstruction metrics while maintaining competitive inference efficiency and moderate architectural complexity. Beyond the numerical improvements, the results reveal clear differences between reconstruction paradigms regarding geometric precision, preservation behavior, and robustness under localized repair-oriented conditions.
+
+The progression of results across the evaluated methods is particularly informative because the methods progressively isolate and address specific limitations of localized reconstruction.
+
+Completion-based reconstruction begins with \ac{pcn}, which establishes the baseline behavior of a standard global completion formulation under localized damage conditions. Although \ac{pcn} achieves moderate ${CD}_{full}$ performance for many samples, this metric is heavily dominated by intact geometry and therefore only weakly reflects reconstruction quality within damaged regions caused by reconstruction failures on geometrically challenging samples. While the majority of predictions exhibit substantially lower reconstruction error, several outlier cases produce distorted global reconstructions, significantly inflating both the mean and standard deviation.
+
+This behavior reflects a fundamental limitation of global completion for localized repair tasks. Since \ac{pcn} reconstructs the entire geometry from a compressed latent representation, intact geometry is discarded and regenerated together with the damaged region. Consequently, the network receives only indirect supervision regarding the localized deformation itself, while the optimization remains dominated by the substantially larger intact region.
+
+The qualitative results in Fig.~\ref{fig:qualitative} further illustrate this limitation. Reconstructed outputs produced by \ac{pcn} frequently appear sparse, diffuse, and geometrically inconsistent within the surface geometry. Although the global shape is often approximately preserved, the reconstructed points fail to form coherent surface continuations, particularly for geometrically ambiguous local surface configurations.
+
+\begin{figure*}[h]
+\centering
+\includegraphics[width=1\textwidth]{figs/Figure_4_7.png}
+\caption{Qualitative comparison on representative test samples. Each row corresponds to a partition extracted from the test set surfaces. From left to right: input \ac{pc}, where intact points are shown in grey and damaged points in red; ground truth, where reconstructed regions are shown in green; and predictions from \ac{pcn}, \ac{lrpcn}, PointCleanNet, FlowNet3D, and SeedDispNet. Corrected points are shown in blue.}
+\label{fig:qualitative}
+\end{figure*}
+
+\ac{lrpcn} substantially improves reconstruction consistency by introducing explicit damage awareness into the completion paradigm. Incorporating point-wise labels together with damage-region localization significantly reduces the global reconstruction error ${CD}_{full}$ and eliminates the failures observed for \ac{pcn}. Intact geometry is additionally preserved through direct propagation of intact input points.
+
+However, the low ${CD}_{full}$ value for \ac{lrpcn} is partly an artifact of its output structure: intact points are copied directly to the output, so they contribute zero error to the full-cloud average, which is dominated by the intact majority. The localized metric ${CD}_{dam}$, which evaluates only the reconstructed region, provides a more faithful assessment and reveals that reconstruction quality within damaged regions remains substantially limited. The damaged-region metrics reveal that generated points are frequently distributed near the damaged region without accurately reconstructing the underlying surface geometry. This behavior is also evident qualitatively, where reconstructed points tend to form spatially diffuse clusters rather than continuous surface patches.
+
+These results indicate an intrinsic limitation of the completion formulation itself. Although damage localization helps constrain where reconstruction should occur, the decoder must still generate the damaged geometry globally from a compressed latent representation. Consequently, fine-scale geometric continuity with the surrounding intact surface remains difficult to recover accurately.
+
+The displacement-based baselines, namely PointCleanNet and FlowNet3D, adopt a more natural formulation for localized reconstruction by predicting geometric displacements directly on existing points rather than generating new geometry. Both methods achieve substantially improved correspondence-aware metrics relative to \ac{lrpcn}, indicating that displacement prediction is inherently better aligned with localized geometric correction.
+
+Nevertheless, both methods remain limited by the absence of explicit damage guidance. Since displacement prediction is performed over the entire point set, the networks must simultaneously infer which points require correction and which points should remain unchanged. This coupled optimization introduces a strong imbalance under repair-oriented conditions, where damaged points represent only a small subset of the partition.
+
+As reflected by the $\mathrm{IDE}$ metric, both methods introduce substantial unintended geometric modifications within intact regions. Qualitatively, the predicted displacements often collapse toward spatially concentrated clusters rather than reconstructing coherent distributed surface structures.
+
+Interestingly, FlowNet3D does not significantly outperform PointCleanNet despite incorporating explicit local neighborhood aggregation through \ac{knn}-based feature extraction. This suggests that the principal limitation is not local feature capacity itself, but rather the absence of explicit damage-aware prediction-domain restriction.
+
+In contrast, SeedDispNet combines displacement-based reconstruction with explicit damage guidance and restricted prediction-domain estimation. By selecting damaged points as reconstruction seeds and excluding intact geometry from displacement prediction, the reconstruction objective becomes fully concentrated on regions requiring correction.
+
+This structural decoupling between reconstruction and preservation substantially improves all reconstruction metrics simultaneously. SeedDispNet achieves approximately one order of magnitude lower ${CD}_{dam}$ and Hausdorff distance relative to the strongest baselines, while also achieving the lowest $\mathrm{MDE}$ values. The low variance observed across all metrics additionally indicates stable reconstruction behavior across varying surface geometries and damage configurations.
+
+The qualitative results further confirm that SeedDispNet produces geometrically coherent surface reconstructions closely aligned with the nominal geometry. Reconstructed points form continuous surface patches that smoothly integrate with the surrounding intact geometry while preserving fine-scale local surface structure.
+
+Unlike blind displacement methods, preservation of intact geometry is not learned implicitly through regularization. Instead, preservation is enforced structurally by excluding intact points from the prediction domain entirely. Consequently, intact geometry remains unchanged rather than through optimization balancing.
+
+An additional observation concerns parameter efficiency. Despite achieving the strongest reconstruction performance, SeedDispNet requires substantially fewer parameters than \ac{lrpcn}. This suggests that restricting prediction to damaged regions not only improves reconstruction quality, but also substantially reduces the representational burden imposed on the network.
+
+Overall, the results indicate that reconstruction performance under repair-oriented conditions depends fundamentally on how the reconstruction problem is formulated. Explicit damage awareness improves localization, displacement prediction provides a more suitable reconstruction paradigm than global generation, and prediction-domain restriction emerges as the critical mechanism enabling accurate localized reconstruction while preserving intact geometry consistently.
+
+\subsection{Ablation Study}
+\label{sec:ablation_results}
+
+To further analyze the proposed reconstruction formulation, this section investigates two key design choices in SeedDispNet: the supervisory loss formulation and the contribution of local geometric features.
+
+Beyond evaluating individual architectural components, the objective of these experiments is to understand how prediction-domain restriction interacts with geometric supervision and feature representation under localized repair-oriented conditions.
+
+\vspace{5mm}
+\noindent\textbf{Loss Function: \ac{mpl2} vs. Chamfer Distance}
+\vspace{2mm}
+
+The first experiment evaluates the influence of the supervisory loss used for displacement prediction. In particular, direct point-wise displacement regression using \ac{mpl2} supervision is compared against the set-based \ac{cd} formulation adopted in SeedDispNet. Quantitative results are summarized in Table~\ref{tab:loss_ablation_results}.
+
+\begin{table*}[h]
+\centering
+\caption{Loss function ablation for SeedDispNet.}
+\label{tab:loss_ablation_results}
+\begin{tabular}{l c c}
+\hline
+\textbf{Loss} & \textbf{CD$_\text{dam}$ [mm]} $\downarrow$ & \textbf{Behavior} \\
+\hline
+\ac{mpl2} & 0.09 & Collapsed predictions (single cluster) \\
+Chamfer Distance & \textbf{0.0423} & Distributed surface reconstruction \\
+\hline
+\end{tabular}
+\end{table*}
+
+Using direct point-wise displacement regression based on \ac{mpl2} supervision leads to degenerate reconstruction behavior in which predicted points collapse toward spatially concentrated regions rather than reconstructing distributed surface geometry. Although explicit point-wise correspondence is enforced, the optimization becomes highly sensitive to displacement averaging effects, producing geometrically over-smoothed solutions.
+
+This behavior reflects an important limitation of direct regression under sparse and spatially heterogeneous displacement distributions. Since damaged regions may contain varying displacement magnitudes and locally ambiguous geometric structures, minimizing average point-wise error encourages the network to predict conservative displacement estimates that reduce overall regression error while failing to preserve the distributed structure of the target surface.
+
+Qualitative inspection further revealed that many predictions produced under \ac{mpl2} supervision converge toward compact point clusters near the centroid of the damaged region. Although such solutions may partially reduce average displacement error, they do not reconstruct geometrically meaningful surface continuations.
+
+Importantly, these collapsed solutions may still achieve comparatively moderate correspondence-aware displacement errors, demonstrating that low point-wise regression error alone does not necessarily imply accurate surface reconstruction. This observation further highlights the limitation of evaluating localized reconstruction exclusively through direct displacement correspondence metrics.
+
+In contrast, \ac{cd} promotes distributed geometric alignment through bidirectional nearest-neighbor consistency between predicted and target point sets. Rather than enforcing strict one-to-one displacement regression, \ac{cd} encourages the predicted points to collectively approximate the spatial distribution of the target surface.
+
+Within the proposed SeedDispNet formulation, this behavior becomes particularly advantageous. Because prediction is restricted exclusively to damaged points and the number of predicted points matches the number of target points, the ambiguity typically associated with set-based supervision is substantially reduced. The network therefore benefits from the geometric flexibility of \ac{cd} while still operating within a structurally constrained reconstruction domain.
+
+Additionally, the bidirectional formulation of \ac{cd} naturally discourages geometric collapse. Predicted points that concentrate around only a subset of the damaged surface leave unmatched target regions with large nearest-neighbor distances, producing strong corrective gradients that encourage spatially distributed reconstruction.
+
+As a result, \ac{cd} enables SeedDispNet to reconstruct coherent surface patches that preserve both the extent and geometric continuity of the damaged region, substantially improving localized reconstruction quality relative to direct displacement regression.
+
+\vspace{5mm}
+\noindent\textbf{Effect of Local Features}
+\vspace{2mm}
+
+The second ablation evaluates the contribution of explicit local geometric descriptors within the proposed SeedDispNet formulation. To isolate this effect, the local feature extraction branch is removed from the architecture, resulting in a simplified variant denoted as SeedDispNet$^\ast$. In this configuration, displacement prediction relies exclusively on seed point coordinates together with the global latent representation extracted from the labeled input partition. Quantitative results are presented in Table~\ref{tab:dis_variant_results}.
+
+\begin{table*}[h]
+\small
+\centering
+\caption{Local feature ablation for SeedDispNet.}
+\label{tab:dis_variant_results}
+\begin{tabular}{l c c c c}
+\hline
+\textbf{Variant} & \textbf{Params} &
+\textbf{CD$_\text{full}$ [mm]} $\downarrow$ &
+\textbf{CD$_\text{dam}$ [mm]} $\downarrow$ &
+\textbf{Hausdorff [mm]} $\downarrow$ \\
+\hline
+SeedDispNet & 779K & 0.0057~\pm 0.03 & \textbf{0.0423}~\pm \textbf{0.06} & \textbf{0.0467}~\pm \textbf{0.06} \\
+SeedDispNet$^\ast$ & 606K & \textbf{0.0056}~\pm \textbf{0.02} & 0.0446~\pm 0.05 & 0.0502~\pm 0.06 \\
+\hline
+\end{tabular}
+\end{table*}
+
+Removing local geometric features produces only a moderate degradation in reconstruction performance, with approximately 5\% increase in ${CD}_{dam}$ and 7\% increase in Hausdorff distance. At the same time, the number of trainable parameters is reduced by approximately 22\%.
+
+These results indicate that local geometric descriptors contribute positively to reconstruction accuracy, particularly in improving fine-scale geometric consistency and reducing localized reconstruction deviations. The improvements are most visible in the damaged-region metrics, suggesting that local features primarily refine surface continuity rather than substantially altering global reconstruction behavior.
+
+Importantly, however, the relatively modest performance degradation also reveals that the dominant factor governing reconstruction quality is not local feature complexity itself, but rather the prediction-domain restriction strategy introduced in SeedDispNet. 
+
+Even without explicit local descriptors, the combination of global contextual information and seed point coordinates already provides a strong geometric prior for localized displacement estimation. Since damaged points are explicitly selected as reconstruction seeds, the network receives direct spatial information regarding both the location and extent of the reconstruction region. The global feature vector additionally provides contextual information about the surrounding surface structure and overall partition geometry.
+
+Consequently, a substantial portion of the reconstruction problem can already be inferred from the geometric arrangement of the damaged seeds within the global surface context. Local descriptors therefore operate primarily as a refinement mechanism that improves geometric precision near complex local surface variations and damage boundaries.
+
+This behavior is particularly consistent with the localized nature of the reconstruction task. Because the damaged regions are spatially compact and geometrically constrained by surrounding intact geometry, much of the required surface continuation can already be estimated from coarse contextual structure. Local feature extraction further improves this estimation by incorporating fine-scale neighborhood information associated with curvature continuity and local surface transitions.
+
+The ablation therefore reinforces the central hypothesis underlying SeedDispNet, that explicitly restricting displacement prediction to damaged regions fundamentally simplifies the reconstruction problem by aligning the prediction domain with the localized spatial structure of material loss. Once this structural alignment is established, additional architectural complexity primarily improves geometric refinement rather than determining reconstruction feasibility itself.
+
+\subsection{Per-Surface Generalization}
+\label{sec:surf_generalization_results}
+
+To evaluate generalization across varying surface geometries, the reconstruction methods that produced geometrically coherent localized reconstructions are analyzed independently on each unseen test surface. This experiment investigates whether reconstruction performance remains stable when the models are applied to geometrically distinct surfaces exhibiting different curvature distributions, local structural variations, and free-form characteristics.
+
+Results are reported in Table~\ref{tab:per-surface analysis} using ${CD}_{dam}$, which directly evaluates localized reconstruction quality within damaged regions.
+
+\begin{table*}[h]
+\small
+\centering
+\caption{Per-surface evaluation on the test set using $\text{CD}_\text{dam}$~[mm] (mean $\pm$ std).}
+\label{tab:per-surface analysis}
+\begin{tabular}{l c c c}
+\hline
+\textbf{Method} & 
+\textbf{Surface 18} &
+\textbf{Surface 19} &
+\textbf{Surface 20} \\
+\hline
+SeedDispNet & \textbf{0.033}~\pm \textbf{0.045} & \textbf{0.049}~\pm \textbf{0.068} & \textbf{0.045}~\pm \textbf{0.050} \\
+LR-PCN & 0.453~\pm 0.232 & 0.449~\pm 0.267 & 0.466~\pm 0.258 \\
+\hline
+\end{tabular}
+\end{table*}
+
+SeedDispNet achieves consistently low reconstruction error across test surfaces, with ${CD}_{dam}$ values ranging from 0.033 to 0.049. The relatively small variation across geometrically distinct surfaces indicates stable generalization behavior and suggests that the proposed formulation does not strongly depend on specific surface morphologies or curvature profiles.
+
+Additionally, standard deviation remains comparatively low across all surfaces, indicating not only accurate reconstruction on average, but also stable behavior across different localized damage configurations extracted from each geometry. This suggests that the reconstruction strategy learned by SeedDispNet transfers consistently across varying local surface structures.
+
+In contrast, \ac{lrpcn} exhibits substantially larger reconstruction error on all surfaces despite relatively consistent behavior across the test set. Although the method generalizes without a higher degradation, its completion-based formulation remains fundamentally limited in reconstructing localized surface deviations with sufficient geometric precision and continuity.
+
+The relatively uniform behavior of \ac{lrpcn} across surfaces is itself informative. Since reconstruction is driven primarily through a compressed global latent representation conditioned by coarse damage localization statistics, the method captures the approximate spatial extent of the damaged region but struggles to reconstruct fine-scale local surface geometry consistently. Consequently, reconstruction quality remains limited independently of the underlying surface morphology.
+
+Across all evaluated surfaces, SeedDispNet consistently outperforms the completion-based baseline by approximately one order of magnitude. This large and stable performance margin indicates that prediction-domain restriction substantially improves robustness to geometric variability and enables reliable reconstruction even for previously unseen local surface configurations.
+
+These results further support one of the central motivations underlying the proposed formulation: localized repair-oriented reconstruction depends less on learning object-level geometric semantics and more on learning transferable local surface correction behavior. Because reconstruction is formulated directly on localized geometric neighborhoods rather than complete objects, the network learns reconstruction priors associated with local surface continuity and deformation correction rather than memorizing global object structures.
+
+More broadly, the results indicate that reconstruction performance under localized repair conditions depends not only on representation capacity, but fundamentally on how well the reconstruction formulation aligns with the spatial structure of material loss. By explicitly restricting displacement prediction to damaged regions while preserving surrounding geometry structurally, SeedDispNet maintains stable reconstruction behavior even under varying surface curvature, geometric complexity, and local deformation patterns.
+
+\subsection{Sensitivity to Damage Size}
+\label{sec:sens_size_results}
+
+To analyze robustness with respect to damage size, reconstruction performance is evaluated as a function of the proportion of damaged points in each partition. Test samples are grouped according to the percentage of damaged points, and results are reported in Table~\ref{tab:size_analysis} using ${CD}_{dam}$.
+
+\begin{table*}[h]
+\small
+\centering
+\caption{Reconstruction performance across damage size ranges. $\text{CD}_\text{dam}$~[mm] (mean).}
+\label{tab:size_analysis}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{l c c c c c}
+\hline
+\textbf{Method} & 
+\textbf{<5\% (688)} &
+\textbf{5–10\% (405)} &
+\textbf{10–20\% (476)} &
+\textbf{20–50\% (184)} &
+\textbf{>50\% (12)} \\
+\hline
+SeedDispNet & \textbf{0.041} & \textbf{0.039} & \textbf{0.037} & \textbf{0.045} & \textbf{0.392} \\
+LR-PCN & 0.578 & 0.423 & 0.365 & 0.321 & 0.413 \\
+\hline
+\end{tabular}
+}
+\end{table*}
+
+SeedDispNet demonstrates stable reconstruction performance across a broad range of localized damage sizes. For partitions containing up to 50\% damaged points, ${CD}_{dam}$ remains within a narrow interval between 0.037 and 0.045, indicating low sensitivity to variations in damage extent and stable reconstruction behavior under increasingly challenging reconstruction conditions.
+
+This stability is particularly significant because the number of predicted points in SeedDispNet adapts naturally to the size of the damaged region. Since displacement prediction is applied exclusively to damaged seeds, the reconstruction formulation scales directly with the spatial extent of the required correction while preserving the surrounding geometry unchanged.
+
+Performance degradation becomes noticeable only in the extreme regime where more than 50\% of the partition is damaged. Under these conditions, the amount of surrounding intact geometry available to constrain nominal surface inference becomes substantially reduced. Consequently, reconstruction increasingly resembles an underconstrained completion problem rather than a localized geometric correction task.
+
+Even in this challenging regime, however, SeedDispNet maintains reconstruction performance comparable to the completion-based baseline while still preserving localized displacement consistency and structural preservation behavior.
+
+The completion-based baseline exhibits markedly different behavior across damage ranges. \ac{lrpcn} progressively improves as the proportion of damaged geometry increases. This trend is consistent with the underlying generation-based formulation of the method.
+
+Since \ac{lrpcn} generates a fixed number of reconstruction points independently of the exact spatial extent of damage, sparse damage configurations produce highly inefficient reconstruction distributions. A relatively large number of generated points must approximate a small localized target region, often resulting in diffuse or spatially inconsistent reconstructions. As the damaged region becomes larger, the ratio between generated points and target geometry becomes more favorable, improving reconstruction coverage and reducing sparsity-related effects.
+
+Importantly, the largest performance gap between SeedDispNet and \ac{lrpcn} occurs precisely in the sparse-damage regime most representative of practical repair scenarios. For partitions containing less than 5\% damaged points, SeedDispNet achieves reconstruction error approximately one order of magnitude lower than the completion baseline while maintaining geometrically coherent localized surface reconstruction.
+
+This behavior is particularly relevant for repair-oriented applications, where damage typically occupies only a small fraction of the observed geometry and most of the scanned surface remains valid. Under such conditions, global reconstruction or unrestricted displacement estimation becomes inherently inefficient because the majority of the geometry does not require modification.
+
+By explicitly restricting displacement prediction to damaged regions, SeedDispNet concentrates representational capacity and optimization entirely on the subset of geometry requiring correction. This alignment between prediction domain and spatial damage structure enables stable reconstruction even when the damaged region becomes extremely sparse relative to the surrounding intact surface.
+
+Overall, the results further support the central hypothesis of this chapter: reconstruction performance under localized repair conditions depends fundamentally on aligning the reconstruction formulation with the spatial structure of material loss. Prediction-domain restriction becomes particularly advantageous under sparse damage conditions, where preservation of intact geometry and localized geometric precision are simultaneously required.
+
+\section{Discussion}
+\label{sec:discussion}
+
+The experimental results demonstrate that reconstruction performance in \ac{am} repair scenarios depends not only on geometric representation capacity, but fundamentally on how the reconstruction problem itself is formulated. In particular, the experiments show that explicit damage awareness and prediction-domain restriction are critical for achieving accurate localized reconstruction while preserving surrounding intact geometry.
+
+Across all experiments, methods incorporating explicit damage localization consistently outperform their unlabeled counterparts. This indicates that damage labels provide substantially more than auxiliary semantic information, defining the spatial support of the reconstruction problem itself. By explicitly identifying which regions require correction, the reconstruction process can focus representational capacity and optimization on geometrically relevant regions instead of simultaneously modeling the entire surface.
+
+The progression from \ac{pcn} to SeedDispNet further reveals a systematic evolution in reconstruction formulation under localized repair conditions.
+
+The baseline \ac{pcn} formulation demonstrates the limitations of treating repair reconstruction as a conventional global completion problem. Because reconstruction is performed through the generation of the entire point cloud, the method discards already valid geometry and attempts to regenerate the complete surface from a compressed latent representation. Under localized damage conditions, this creates a strong optimization imbalance in which the reconstruction loss is dominated by intact geometry, while the damaged region contributes only a small fraction of the supervisory signal. As a result, the network may recover coarse global structure while failing to reconstruct coherent local surface geometry within damaged regions.
+
+Introducing explicit damage guidance through \ac{lrpcn} substantially improves reconstruction stability and localization behavior. By conditioning the latent representation on damage labels and restricting generation to damaged regions, the method avoids the global reconstruction failures observed in \ac{pcn} and preserves intact geometry through direct propagation of the original points.
+
+However, the experiments also reveal an important limitation of completion-based reconstruction under localized repair conditions. Although localization improves, reconstruction remains fundamentally constrained by the generation paradigm itself. The decoder must infer localized surface geometry from a highly compressed global representation together with coarse spatial statistics of the damaged region. Consequently, the generated points frequently occupy the correct spatial region but fail to reconstruct geometrically coherent surface structure or smooth continuity with the surrounding intact geometry.
+
+This limitation becomes particularly evident in the damaged-region metrics, where \ac{lrpcn} remains substantially less accurate than SeedDispNet despite its significantly larger parameter count. The results therefore suggest that explicit damage localization alone is insufficient when reconstruction remains formulated as fixed-size point generation from global latent features.
+
+The displacement-based baselines further clarify the importance of explicit prediction-domain restriction. Conceptually, displacement estimation is naturally aligned with repair-oriented reconstruction because damaged points already exist near their nominal locations and therefore require correction rather than full regeneration.
+
+Nevertheless, unrestricted displacement prediction through PointCleanNet and FlowNet3D produces limited reconstruction quality despite preserving point-wise correspondence. Since displacement is predicted for the entire \ac{pc}, the optimization process becomes inherently coupled, requiring the network must simultaneously learn corrective transformations for damaged points while preserving near-zero displacement on intact geometry.
+
+Under sparse damage conditions, this creates a highly imbalanced optimization problem in which most predicted displacements should ideally remain null. The experiments show that, without explicit damage awareness, the networks frequently converge toward geometrically collapsed solutions characterized by spatially concentrated point clusters and unintended deformation of intact regions.
+
+Importantly, the comparison between PointCleanNet and FlowNet3D indicates that increasing architectural sophistication alone does not resolve this limitation. Although FlowNet3D introduces explicit local neighborhood aggregation through \ac{knn}-based reasoning, its performance remains nearly identical to the PointCleanNet formulation. This suggests that the principal bottleneck is not insufficient local feature extraction, but rather the absence of an appropriate structural constraint defining where reconstruction should occur.
+
+SeedDispNet addresses these limitations by explicitly aligning the prediction domain with the spatial structure of material loss. Instead of predicting displacements for the complete \ac{pc}, reconstruction is restricted exclusively to points labeled as damaged, which are treated as reconstruction seeds.
+
+This formulation produces several important consequences. First, intact geometry is preserved structurally rather than through optimization penalties or learned behavior. Since intact points are excluded from the prediction domain entirely, preservation no longer competes with reconstruction during optimization.
+
+Second, the reconstruction objective becomes fully concentrated on geometrically relevant regions. Every predicted displacement contributes directly to localized surface correction, eliminating the optimization inefficiency associated with predicting identity mappings for the majority of the geometry.
+
+Third, the number of predicted points naturally adapts to the size of the damaged region while preserving point-set correspondence. Unlike completion-based approaches, reconstruction therefore scales directly with the spatial extent of the required correction rather than relying on fixed-size point generation.
+
+The resulting improvements are consistent across all experiments. SeedDispNet achieves substantially lower reconstruction error, improved geometric continuity, lower worst-case deviations, and stable preservation behavior across varying surface geometries and damage extents. The reduced standard deviation observed across metrics additionally indicates improved robustness and reconstruction consistency under heterogeneous localized damage conditions.
+
+The ablation experiments further clarify the role of supervision and feature representation within the proposed formulation.
+
+The comparison between \ac{mpl2} regression and \ac{cd} supervision demonstrates that localized repair reconstruction is fundamentally a distributed geometric reconstruction problem rather than purely a point-wise regression task. Direct displacement regression encourages displacement averaging and geometrically over-smoothed predictions, frequently producing spatial collapse toward compact point clusters. In contrast, \ac{cd} promotes distributed surface reconstruction through bidirectional geometric matching, encouraging the predicted points to collectively approximate the target surface geometry.
+
+Importantly, this behavior becomes stable specifically because prediction is restricted to damaged regions. Under unrestricted displacement prediction, set-based supervision may introduce ambiguity due to the absence of explicit point correspondence. However, in SeedDispNet the prediction structure itself preserves implicit correspondence between damaged seeds and reconstructed geometry, allowing \ac{cd} to function as an effective supervisory signal for localized surface reconstruction.
+
+The local feature ablation additionally indicates that prediction-domain restriction constitutes the dominant factor governing reconstruction performance. Although local geometric descriptors improve fine-scale surface consistency and reduce localized geometric deviations, the simplified variant without local features still maintains strong reconstruction performance. This suggests that global contextual information together with the spatial configuration of the damaged seeds already provides a highly informative geometric prior for localized reconstruction.
+
+% From a repair workflow perspective, the proposed formulation is naturally compatible with automated nominal-independent repair pipelines. The assumption of damage labels at inference time directly aligns with practical industrial workflows, where reconstruction is preceded by inspection or damage localization stages. Consequently, SeedDispNet integrates naturally with the nominal-independent damage detection methodologies developed in Chapters~\ref{chap:geom-damage-detection} and~\ref{chap:ml-damage-detection}, enabling reconstruction to operate conditionally on previously identified repair regions.
+
+From a repair workflow perspective, the proposed formulation is naturally compatible with automated nominal-independent repair pipelines. The assumption of damage labels at inference time directly aligns with practical industrial workflows, where reconstruction is preceded by inspection or damage localization stages. Consequently, SeedDispNet integrates naturally with the nominal-independent damage detection methodologies developed in Chapters~\ref{chap:geom-damage-detection} and~\ref{chap:ml-damage-detection}, enabling reconstruction to operate conditionally on previously identified repair regions. This integration is particularly important for downstream repair planning, as accurate nominal reconstruction directly determines the fidelity of damage volume estimation and the geometric validity of subsequent deposition trajectories. Reconstruction errors may therefore propagate downstream, leading to over-deposition, under-deposition, or unnecessary post-process machining operations.
+
+Overall, the findings indicate that reliable nominal reconstruction in repair-oriented workflows is achieved not simply through stronger geometric modeling capacity, but through explicitly aligning the reconstruction process with the spatial structure of localized material loss. By restricting displacement estimation to geometrically relevant regions, SeedDispNet transforms reconstruction from a global generation problem into a focused localized surface correction task, enabling accurate and geometrically consistent nominal recovery under sparse damage conditions.
+
+\section{Summary}
+\label{sec:summary}
+
+This chapter presented a data-driven framework for nominal geometry reconstruction under nominal-independent repair conditions. In contrast to conventional shape completion formulations, reconstruction was treated as a localized geometric correction problem in which only damaged regions are reconstructed while surrounding intact geometry is preserved.
+
+To support controlled evaluation under repair-oriented conditions, the DMSurface dataset was introduced, providing synthetic localized surface damage together with point-wise annotations and corresponding nominal geometry. Based on this dataset, multiple reconstruction paradigms were comparatively investigated, including completion-based methods, unconstrained displacement-based formulations, and the proposed label-guided seed displacement strategy.
+
+The proposed SeedDispNet architecture formulates reconstruction as displacement estimation restricted exclusively to damaged points. By incorporating explicit damage localization into the reconstruction process, the method aligns the prediction domain with the localized nature of material loss typically observed in \ac{am} repair scenarios.
+
+\subsection{Key Findings}
+
+The experimental results demonstrate that explicit damage awareness plays a central role in localized nominal reconstruction. Across all evaluated configurations, methods incorporating damage localization achieved more accurate and stable reconstruction behavior than approaches operating without explicit spatial guidance.
+
+The comparative analysis additionally highlighted important differences between reconstruction paradigms. Completion-based approaches showed limited capability in reconstructing localized surface geometry under sparse damage conditions, whereas displacement-based formulations proved more naturally aligned with repair-oriented reconstruction due to their preservation of geometric correspondence between input and reconstructed surfaces.
+
+Among the evaluated methods, SeedDispNet achieved the strongest overall reconstruction performance across localized reconstruction metrics while preserving intact geometry structurally through the reconstruction formulation itself. Restricting displacement prediction to damaged regions simplified the reconstruction problem while simultaneously preserving intact geometry and concentrating reconstruction capacity on regions that directly determine repair volume and material restoration.
+
+The ablation experiments further showed that both the supervisory formulation and the restricted prediction-domain strategy contribute significantly to reconstruction behavior. In particular, set-based geometric supervision promoted stable distributed surface reconstruction, while local geometric descriptors improved fine-scale reconstruction consistency.
+
+Evaluation across varying surface geometries and damage extents additionally demonstrated stable generalization capability, particularly under sparse localized damage conditions representative of practical repair scenarios.
+
+Overall, the results establish that nominal reconstruction in \ac{am} repair differs fundamentally from generic shape completion problems. Rather than recovering globally missing geometry, repair-oriented reconstruction is more effectively formulated as a localized and damage-aware geometric correction task. Explicit incorporation of damage localization together with prediction-domain restriction provides a reconstruction strategy that is both geometrically consistent and structurally aligned with the requirements of automated repair workflows.
+
+\subsection{Limitations and Scope}
+
+This study was conducted under controlled synthetic conditions to enable systematic evaluation of reconstruction strategies and precise point-wise supervision. Although the proposed dataset incorporates heterogeneous surface geometries and irregular localized deformations, it does not fully reproduce the complexity of real industrial acquisition conditions, including sensing artifacts, non-uniform sampling, occlusions, and complex degradation phenomena.
+
+The proposed framework assumes the availability of accurate damage labels prior to reconstruction. While this assumption is consistent with practical repair workflows, where inspection or damage detection precedes reconstruction, the propagation of segmentation uncertainty into reconstruction quality was not explicitly investigated within the scope of this chapter.
+
+The reconstruction formulation additionally focuses exclusively on localized surface material loss represented through geometric deformation. Other damage classes, such as cracks, delamination, or subsurface damages, are not addressed because they may not produce directly observable surface deviations within \acp{pc}.
+
+The current implementation operates on local partitions independently and does not explicitly enforce geometric continuity across neighboring regions. Although suitable for localized repair scenarios, larger-scale or highly connected geometries may require additional mechanisms to ensure global surface consistency.
+
+Finally, reconstruction was evaluated primarily through geometric metrics. Although accurate nominal reconstruction is a prerequisite for repair volume estimation and subsequent repair planning, the downstream influence of reconstruction quality on deposition planning and repair execution was not explicitly investigated.
+
+Overall, this chapter establishes localized and label-guided displacement prediction as a robust and structurally consistent formulation for nominal-independent reconstruction in \ac{am} repair. The proposed methodology provides the geometric foundation required for repair volume estimation and subsequent repair planning stages, while highlighting the importance of locality, preservation, and damage-aware reasoning within automated repair workflows.
+
+\vspace{10mm} \noindent{The research presented in this chapter was submitted to \textit{Additive Manufacturing}, under the title \textit{SeedDispNet: Label-Guided Seed Displacement for Local Surface Reconstruction in Additive Manufacturing Repair}.} \vspace{2mm}
+
+
+
+
+% Despite the strong performance observed on DMSurface, several limitations remain. The dataset is synthetically generated and therefore does not fully capture the complexity of real industrial acquisition conditions, including sensing noise, occlusions, non-uniform sampling density, and irregular degradation mechanisms. In addition, the present formulation assumes accurate damage labels and does not explicitly model uncertainty propagated from upstream detection stages. Consequently, reconstruction performance may degrade under segmentation errors or uncertain damage boundaries.
+
+% Furthermore, reconstruction is currently performed independently on localized partitions without explicitly enforcing global geometric consistency across neighboring regions. Although suitable for localized repair scenarios, extending the approach to larger-scale or highly connected geometries may require mechanisms for cross-partition consistency and surface continuity.
+
+% These limitations indicate several directions for future work, including uncertainty-aware reconstruction, validation on real industrial datasets, and integration of geometric continuity constraints across neighboring reconstruction regions.
+
+% Overall, the results demonstrate that reconstruction in \ac{am} repair differs fundamentally from generic shape completion problems. Rather than recovering globally missing geometry, repair-oriented reconstruction is more naturally formulated as a localized and damage-aware geometric correction task. Explicit incorporation of damage localization together with prediction-domain restriction provides a reconstruction strategy that is both geometrically consistent and structurally aligned with the requirements of automated repair workflows.
+
+% \section{Summary}
+% \label{sec:summary}
+
+% This chapter presented a data-driven framework for nominal geometry reconstruction and repair volume estimation under nominal-independent repair conditions. In contrast to conventional completion-based formulations, reconstruction was formulated as a localized and label-guided geometric correction problem, where only damaged regions are modified while intact geometry is preserved by construction.
+
+% To support controlled and repair-oriented evaluation, the DMSurface dataset was introduced, comprising localized synthetic surface damages with point-wise damage annotations and corresponding nominal geometry. Building on this dataset, multiple reconstruction paradigms were systematically investigated, including completion-based, blind displacement-based, and the proposed label-guided seed displacement formulation.
+
+% The proposed SeedDispNet architecture reformulates reconstruction as a localized displacement prediction problem restricted to damaged points. This formulation explicitly incorporates damage localization into the prediction process and aligns the reconstruction strategy with the localized nature of material loss in \ac{am} repair workflows.
+
+% \subsection{Key Findings}
+
+% The results demonstrate that reconstruction performance in repair-oriented scenarios depends strongly on explicit damage localization and on restricting prediction to regions requiring correction. Across all experiments, label-guided approaches consistently outperformed their unlabeled counterparts, highlighting the importance of incorporating damage-awareness directly into the reconstruction process.
+
+% Among the evaluated methods, the proposed SeedDispNet achieved the best overall reconstruction performance across all localized reconstruction metrics. By restricting displacement prediction exclusively to damaged points, the method concentrates predictive capacity on regions requiring correction while preserving intact geometry structurally through the reconstruction formulation itself.
+
+% The experiments additionally revealed important differences between completion-based and displacement-based reconstruction paradigms. Completion-based approaches exhibited limited capability in reconstructing localized surface deviations, particularly under sparse damage conditions, whereas displacement-based approaches proved more naturally aligned with repair-oriented reconstruction due to their preservation of spatial correspondence between input and output geometry.
+
+% The proposed seed-based formulation further improved this paradigm by decoupling geometric correction from intact-region preservation. Unlike blind displacement methods, which must jointly learn corrective and identity mappings, SeedDispNet eliminates unnecessary prediction over intact regions, reducing reconstruction complexity and improving stability.
+
+% The ablation studies demonstrated that both supervisory formulation and prediction-domain restriction play critical roles in reconstruction behavior. Chamfer Distance provided stable distributed surface reconstruction, whereas direct point-wise regression produced degenerate collapsed solutions. In addition, the experiments showed that strong reconstruction performance can already be achieved using global geometric context together with seed point coordinates, while local geometric descriptors further improve fine-scale surface consistency.
+
+% Evaluation across varying surface geometries and damage extents further demonstrated robust generalization capability, particularly under sparse damage conditions representative of practical repair scenarios.
+
+% Overall, the results establish that nominal reconstruction in \ac{am} repair is more effectively formulated as a damage-aware geometric correction problem rather than as a global shape completion task.
+
+% \subsection{Limitations and Scope}
+
+% This study was intentionally conducted under controlled synthetic conditions to enable systematic evaluation of reconstruction strategies and precise point-wise supervision. Although the DMSurface dataset incorporates heterogeneous surface geometries, localized damage patterns, and irregular deformation profiles, it does not fully reproduce the complexity of real industrial acquisition conditions, including scanning artifacts, non-uniform sampling density, occlusions, and stochastic material degradation processes.
+
+% The proposed framework assumes the availability of accurate damage labels prior to reconstruction. While this assumption is consistent with practical repair workflows, where inspection or damage detection precedes reconstruction, the propagation of segmentation uncertainty into reconstruction quality was not explicitly investigated within the scope of this chapter.
+
+% The reconstruction formulation additionally focuses exclusively on localized surface material loss represented through geometric deformation. Other damage classes, such as cracks, delamination, or subsurface defects, are not addressed because they may not produce directly observable surface deviations within \acp{pc}.
+
+% The current implementation operates on local partitions independently and does not explicitly enforce geometric continuity across neighboring regions. Although suitable for localized repair scenarios, larger-scale or highly connected geometries may require additional mechanisms to ensure global surface consistency.
+
+% Furthermore, evaluation was conducted primarily using geometric reconstruction metrics. While accurate nominal reconstruction constitutes a prerequisite for repair volume estimation and downstream deposition planning, the direct influence of reconstruction quality on toolpath generation, deposition stability, and final repair performance was not evaluated within this chapter.
+
+% Overall, this chapter establishes localized and label-guided displacement prediction as a robust and structurally consistent formulation for nominal-independent reconstruction in \ac{am} repair. The proposed methodology provides the geometric foundation required for repair volume estimation and subsequent repair planning stages, while highlighting the importance of locality, preservation, and damage-aware reasoning within automated repair workflows.

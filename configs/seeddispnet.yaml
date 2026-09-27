@@ -1,0 +1,23 @@
+# SeedDisplacementNet (M7) — proposed method.
+model: seeddispnet
+data_root: ../D-PCN2/data/DMSurface
+num_points: 2048
+batch_size: 24
+lr: 0.001
+epochs: 500
+lr_decay_step: 80
+lr_decay_rate: 0.7
+weight_decay: 0.0001
+# Model parameters
+latent_dim: 512
+feature_dim: 256
+# Loss flags: default per-point L2 (use_cd=False). Set use_cd for L1 Chamfer,
+# and use_squared_cd (with use_cd) for the squared-CD ablation.
+use_cd: true
+use_squared_cd: false
+no_local: false
+# System / reproducibility
+seed: 42
+gpu: 1
+num_workers: 4
+log_dir: log/seeddispnet

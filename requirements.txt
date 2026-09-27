@@ -1,0 +1,20 @@
+# Python dependencies for the point-cloud reconstruction project.
+# Generated from the third-party packages imported by clean_repo source files
+# under src/ and scripts/. Standard-library modules are not listed.
+
+# Core numerical / deep-learning stack
+torch          # models, losses, training, evaluation (imports torch.nn, torch.optim, torch.utils.data)
+numpy          # array handling throughout data, models, evaluation
+scipy          # scipy.spatial.cKDTree for nearest-neighbor metrics
+matplotlib     # training curves and qualitative figures
+tqdm           # progress bars during training and evaluation
+PyYAML         # YAML config loading (imported as `yaml` in src/training/config.py)
+
+# Dataset generation only (lazy import in src/data/generate_dataset.py)
+open3d         # point-cloud sampling and mesh handling
+
+# Optional: GPU / CUDA acceleration.
+# torch runs on CPU by default; device selection falls back to CPU when CUDA is
+# unavailable. For GPU acceleration install a CUDA-enabled torch build matching
+# your CUDA toolkit, e.g.:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121

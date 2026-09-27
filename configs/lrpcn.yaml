@@ -1,0 +1,20 @@
+# LocalReconstructionPCN (M3) — label-guided local reconstruction.
+model: lrpcn
+data_root: data/DMSurface
+num_points: 2048
+batch_size: 24
+lr: 0.0005
+epochs: 300
+lr_decay_step: 50
+lr_decay_rate: 0.7
+weight_decay: 0.0001
+# Model / loss parameters
+latent_dim: 512
+predict_ratio: 0.5
+coverage_weight: 0.5
+imbalance_aware: true
+# System / reproducibility
+seed: 42
+gpu: 0
+num_workers: 4
+log_dir: log/lrpcn

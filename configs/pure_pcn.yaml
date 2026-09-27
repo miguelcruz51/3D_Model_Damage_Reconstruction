@@ -1,0 +1,18 @@
+# PurePCN (M1) — full-reconstruction completion baseline.
+model: pure_pcn
+data_root: data/DMSurface
+num_points: 2048
+batch_size: 24
+lr: 0.0005
+epochs: 500
+lr_decay_step: 80
+lr_decay_rate: 0.7
+weight_decay: 0.0001
+# Model / loss parameters
+latent_dim: 512
+coarse_weight: 0.5
+# System / reproducibility
+seed: 42
+gpu: 0
+num_workers: 4
+log_dir: log/pure_pcn
